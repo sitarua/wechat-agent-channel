@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "wechat": {
+      "command": "node",
+      "args": ["./index.js"]
+    }
+  }
+}
