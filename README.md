@@ -2,6 +2,8 @@
 
 把微信消息转给 `Claude Code` 或 `Codex`。
 
+License: MIT
+
 规则很简单：
 - 消息里包含 `codex`，走 Codex
 - 其他消息，走 Claude Code
