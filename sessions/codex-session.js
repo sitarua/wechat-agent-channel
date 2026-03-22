@@ -1,16 +1,17 @@
 import fs from "fs";
 import path from "path";
 import net from "net";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const TIMEOUT_MS = 120_000;
 const STORE_FILE = path.join(__dirname, "codex-threads.json");
 const APP_SERVER_HOST = "127.0.0.1";
 const DEFAULT_MODEL = process.env.CODEX_MODEL || "gpt-5-codex";
+const DEFAULT_TIMEOUT_MS = 120_000;
+const TIMEOUT_MS = getTimeoutMs();
 
 let child = null;
 let ws = null;
@@ -23,6 +24,45 @@ const threadStore = loadThreadStore();
 
 function log(msg) {
   process.stderr.write(`[codex-session] ${msg}\n`);
+}
+
+function getTimeoutMs() {
+  const raw = process.env.CODEX_TURN_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_TIMEOUT_MS;
+
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_TIMEOUT_MS;
+  }
+
+  return Math.floor(value);
+}
+
+function resolveCodexLaunchSpec() {
+  const override = process.env.CODEX_BIN?.trim();
+  if (override) {
+    return { command: override, args: [] };
+  }
+
+  if (process.platform !== "win32") {
+    return { command: "codex", args: [] };
+  }
+
+  try {
+    const result = spawnSync("where.exe", ["codex.exe"], { encoding: "utf-8" });
+    if (result.status === 0) {
+      const command = result.stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean);
+
+      if (command) {
+        return { command, args: [] };
+      }
+    }
+  } catch {}
+
+  return { command: "cmd.exe", args: ["/d", "/s", "/c", "codex.cmd"] };
 }
 
 function loadThreadStore() {
@@ -43,13 +83,22 @@ function saveThreadStore() {
   }
 }
 
+function clearThreadStore() {
+  for (const key of Object.keys(threadStore)) {
+    delete threadStore[key];
+  }
+  saveThreadStore();
+}
+
 function resetConnectionState(error) {
-  if (ws) {
+  const socket = ws;
+  ws = null;
+
+  if (socket && socket.readyState === WebSocket.OPEN) {
     try {
-      ws.close();
+      socket.close();
     } catch {}
   }
-  ws = null;
   connectionPromise = null;
   notificationListeners.clear();
 
@@ -65,6 +114,11 @@ function cleanupChild() {
     child.kill("SIGTERM");
   } catch {}
   child = null;
+}
+
+function isTimeoutError(err) {
+  const message = err?.message || String(err);
+  return message.includes("超时");
 }
 
 async function getFreePort() {
@@ -94,10 +148,20 @@ async function ensureServer() {
   connectionPromise = (async () => {
     const port = await getFreePort();
     const url = `ws://${APP_SERVER_HOST}:${port}`;
+    const launch = resolveCodexLaunchSpec();
 
-    child = spawn("codex", ["app-server", "--listen", url], {
+    // app-server 重启后，旧 thread id 会失效；启动新 server 时清空本地映射
+    clearThreadStore();
+
+    child = spawn(launch.command, [...launch.args, "app-server", "--listen", url], {
       env: { ...process.env, NO_COLOR: "1" },
       stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    child.once("error", (err) => {
+      log(`启动 Codex 失败 (${launch.command}): ${String(err)}`);
+      resetConnectionState(err);
+      child = null;
     });
 
     child.stdout.on("data", (data) => {
@@ -155,7 +219,6 @@ async function connectWebSocket(url) {
         };
 
         socket.onerror = () => {
-          socket.close();
           reject(new Error(`连接 ${url} 失败`));
         };
       });
@@ -288,6 +351,7 @@ async function startTurn(threadId, userMessage) {
 
   return new Promise(async (resolve, reject) => {
     const timer = setTimeout(() => {
+      log(`等待 turn/completed 超时 (${TIMEOUT_MS}ms, thread=${threadId})`);
       notificationListeners.delete(onNotification);
       reject(new Error("等待 turn/completed 超时"));
     }, TIMEOUT_MS);
@@ -346,6 +410,9 @@ async function startTurn(threadId, userMessage) {
         ],
       });
       currentTurnId = result?.turn?.id || null;
+      log(
+        `已提交到 Codex，等待 turn/completed (thread=${threadId}, turn=${currentTurnId || "unknown"}, timeout=${TIMEOUT_MS}ms)`
+      );
     } catch (err) {
       finish(reject, err);
     }
@@ -363,12 +430,23 @@ export async function run(userId, userMessage) {
     return await runOnce(userId, userMessage);
   } catch (err) {
     log(`首次执行失败，尝试重建线程: ${String(err)}`);
+    if (isTimeoutError(err)) {
+      cleanupChild();
+      resetConnectionState(err);
+      return "❌ Codex 10 秒内没有返回结果，请稍后重试。";
+    }
+
     delete threadStore[userId];
     saveThreadStore();
 
     try {
       return await runOnce(userId, userMessage);
     } catch (retryErr) {
+      if (isTimeoutError(retryErr)) {
+        cleanupChild();
+        resetConnectionState(retryErr);
+        return "❌ Codex 10 秒内没有返回结果，请稍后重试。";
+      }
       return `❌ Codex 执行失败：${retryErr.message || String(retryErr)}`;
     }
   }

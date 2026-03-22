@@ -11,10 +11,11 @@ import { getUpdates, sendMessage } from "./wechat.js";
 import { routeTask } from "./router.js";
 import { addTask } from "./queue.js";
 import { run as runCodex } from "./sessions/codex-session.js";
-import { getCredentialsFile, loadAccount } from "./config.js";
+import { getAppConfigFile, getCredentialsFile, loadAccount, loadAppConfig } from "./config.js";
 
 const CHANNEL_NAME = "wechat";
 const CHANNEL_VERSION = "0.1.0";
+const INSTANCE_LOCK_FILE = path.join(path.dirname(getAppConfigFile()), "wechat-agent.lock");
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const BACKOFF_DELAY_MS = 30_000;
@@ -25,6 +26,96 @@ const RETRY_DELAY_MS = 2_000;
 function log(msg) {
   process.stderr.write(`[wechat-agent] ${msg}\n`);
 }
+
+let instanceLockFd = null;
+
+function acquireSingleInstanceLock() {
+  fs.mkdirSync(path.dirname(INSTANCE_LOCK_FILE), { recursive: true });
+
+  while (true) {
+    try {
+      const fd = fs.openSync(INSTANCE_LOCK_FILE, "wx");
+      fs.writeFileSync(
+        fd,
+        JSON.stringify(
+          {
+            pid: process.pid,
+            startedAt: new Date().toISOString(),
+          },
+          null,
+          2
+        ),
+        "utf-8"
+      );
+      instanceLockFd = fd;
+      return true;
+    } catch (err) {
+      if (err?.code !== "EEXIST") {
+        throw err;
+      }
+
+      const runningPid = readLockedPid();
+      if (runningPid && isProcessAlive(runningPid)) {
+        log(`检测到已有实例在运行 (pid=${runningPid})，当前进程退出`);
+        return false;
+      }
+
+      try {
+        fs.unlinkSync(INSTANCE_LOCK_FILE);
+        log("发现陈旧锁文件，已自动清理");
+      } catch (unlinkErr) {
+        if (unlinkErr?.code !== "ENOENT") {
+          throw unlinkErr;
+        }
+      }
+    }
+  }
+}
+
+function readLockedPid() {
+  try {
+    const raw = fs.readFileSync(INSTANCE_LOCK_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    const pid = Number(parsed?.pid);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM";
+  }
+}
+
+function releaseSingleInstanceLock() {
+  if (instanceLockFd === null) return;
+
+  try {
+    fs.closeSync(instanceLockFd);
+  } catch {}
+
+  instanceLockFd = null;
+
+  try {
+    fs.unlinkSync(INSTANCE_LOCK_FILE);
+  } catch {}
+}
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    releaseSingleInstanceLock();
+    process.exit(0);
+  });
+}
+
+process.once("exit", () => {
+  releaseSingleInstanceLock();
+});
 
 // ── context_token 缓存（sender_id → context_token，用于回复）───────────────
 
@@ -104,6 +195,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 async function startPolling() {
   let getUpdatesBuf = "";
   let consecutiveFailures = 0;
+  const appConfig = loadAppConfig();
+  const defaultProvider = routeTask(appConfig?.defaultProvider);
 
   // 持久化同步游标（重启后继续，不重复收消息）
   const syncBufFile = path.join(
@@ -118,6 +211,7 @@ async function startPolling() {
   } catch {}
 
   log("开始监听微信消息...");
+  log(`当前默认 provider: ${defaultProvider}`);
 
   while (true) {
     try {
@@ -162,12 +256,13 @@ async function startPolling() {
 
         log(`收到消息: from=${senderId.split("@")[0]} text=${text.slice(0, 60)}`);
 
-        const route = routeTask(text);
+        const route = defaultProvider;
 
         if (route === "codex") {
           // ── Codex 路由：我们自己处理，维护会话历史 ──────────────────────
           addTask(async () => {
             log(`[codex] 处理来自 ${senderId.split("@")[0]} 的消息...`);
+            log("[codex] 已转交 Codex，会在拿到结果后自动回复微信");
             const result = await runCodex(senderId, text);
             const ctx = contextTokenCache.get(senderId);
             if (ctx) {
@@ -231,6 +326,10 @@ function sleep(ms) {
 // ── 入口 ─────────────────────────────────────────────────────────────────────
 
 async function main() {
+  if (!acquireSingleInstanceLock()) {
+    return;
+  }
+
   const account = loadAccount();
   if (!account) {
     log(`⚠️  未找到微信登录凭据，请先运行 npm run setup 或设置 BOT_TOKEN`);
@@ -239,6 +338,13 @@ async function main() {
     log("使用环境变量 BOT_TOKEN 登录微信");
   } else {
     log(`使用本地微信登录凭据${account.accountId ? `: ${account.accountId}` : ""}`);
+  }
+
+  const appConfig = loadAppConfig();
+  if (!appConfig?.defaultProvider) {
+    log("⚠️  未找到 provider 配置，默认回退到 claude");
+    log(`配置文件位置: ${getAppConfigFile()}`);
+    log("请运行 npm run setup 完成首次 provider 选择");
   }
 
   // 先建立 MCP 连接（Claude Code 等待 stdio 握手）
@@ -250,6 +356,7 @@ async function main() {
 }
 
 main().catch((err) => {
+  releaseSingleInstanceLock();
   process.stderr.write(`[wechat-agent] Fatal: ${String(err)}\n`);
   process.exit(1);
 });

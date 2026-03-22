@@ -1,11 +1,57 @@
 import qrcode from "qrcode-terminal";
 import fetch from "node-fetch";
+import readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 
-import { DEFAULT_BASE_URL, getCredentialsFile, saveAccount } from "./credentials.js";
+import {
+  DEFAULT_BASE_URL,
+  getAppConfigFile,
+  getCredentialsFile,
+  loadAppConfig,
+  saveAccount,
+  saveAppConfig,
+} from "./credentials.js";
 
 const BOT_TYPE = "3";
 const LOGIN_TIMEOUT_MS = 480_000;
 const STATUS_TIMEOUT_MS = 35_000;
+
+async function promptProvider() {
+  const existingConfig = loadAppConfig();
+  if (existingConfig?.defaultProvider) {
+    console.log(`当前默认 provider: ${existingConfig.defaultProvider}`);
+    console.log(`配置文件位置: ${getAppConfigFile()}`);
+    return existingConfig.defaultProvider;
+  }
+
+  const rl = readline.createInterface({ input, output });
+
+  try {
+    console.log("首次启动需要选择默认 provider：");
+    console.log("1. Codex");
+    console.log("2. Claude Code");
+
+    while (true) {
+      const answer = (await rl.question("请输入 1 或 2: ")).trim();
+
+      if (answer === "1") {
+        saveAppConfig({ defaultProvider: "codex" });
+        console.log(`已保存默认 provider: codex (${getAppConfigFile()})`);
+        return "codex";
+      }
+
+      if (answer === "2") {
+        saveAppConfig({ defaultProvider: "claude" });
+        console.log(`已保存默认 provider: claude (${getAppConfigFile()})`);
+        return "claude";
+      }
+
+      console.log("输入无效，请输入 1 或 2。");
+    }
+  } finally {
+    rl.close();
+  }
+}
 
 async function fetchQRCode(baseUrl) {
   const url = `${baseUrl}/ilink/bot/get_bot_qrcode?bot_type=${BOT_TYPE}`;
@@ -85,6 +131,7 @@ async function main() {
       console.log(`账号 ID: ${account.accountId}`);
       if (account.userId) console.log(`用户 ID: ${account.userId}`);
       console.log(`凭据已保存到: ${getCredentialsFile()}`);
+      await promptProvider();
       return;
     }
 

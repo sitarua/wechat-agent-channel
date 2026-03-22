@@ -20,9 +20,10 @@ git clone https://gitee.com/zywoo121/wechat-agent-channel.git
 cd wechat-agent-channel
 ```
 
-规则很简单：
-- 消息里包含 `codex`，走 Codex
-- 其他消息，走 Claude Code
+规则现在改成：
+- 首次初始化时，在终端里选择默认 provider：`Codex` 或 `Claude Code`
+- 之后微信消息默认都走这个 provider
+- 不需要在聊天内容里写 `codex xxx` 这类前缀
 
 ## 依赖
 
@@ -52,12 +53,23 @@ codex
 npm run setup
 ```
 
-`npm run setup` 会显示二维码，用微信扫码并确认后，微信登录凭据会自动保存到本地。
+`npm run setup` 会显示二维码，用微信扫码并确认后保存微信登录凭据。
+
+首次初始化时，`npm run setup` 还会在终端里提示你选择默认 provider：
+
+- `1` -> `Codex`
+- `2` -> `Claude Code`
 
 默认凭据位置：
 
 ```text
 ~/.wechat-agent-channel/wechat/account.json
+```
+
+默认 provider 配置位置：
+
+```text
+~/.wechat-agent-channel/config.json
 ```
 
 ## 可选配置
@@ -69,7 +81,17 @@ npm run setup
 
 ## 启动
 
-在项目目录运行：
+如果默认 provider 选的是 `Codex`，直接在项目目录运行：
+
+```bash
+npm start
+```
+
+这会直接启动 [index.js](/e:/play/wechat-agent-channel/index.js)，开始监听微信消息，并在内部调用 `codex app-server` 处理会话。
+`codex app-server` 不是启动时常驻拉起，而是等微信真正收到消息、并且路由到 Codex 时才懒启动。
+Codex 模式下只保留一个 `npm start` 实例；重复启动会被单实例锁拦住，避免多个轮询器同时拉起多个 Codex 会话。
+
+如果默认 provider 选的是 `Claude Code`，在项目目录运行：
 
 ```bash
 claude --dangerously-load-development-channels server:wechat
@@ -81,9 +103,8 @@ Claude Code 会读取 [.mcp.json](/e:/play/wechat-agent-channel/.mcp.json)，启
 
 示例：
 
-- `帮我解释这段代码` -> Claude Code
-- `codex 帮我写个脚本` -> Codex
-- `codex 刚才那个继续改` -> 继续同一个 Codex 会话
+- 如果初始化时选择了 `Codex`，那么 `帮我写个脚本` 会直接走 Codex
+- 如果初始化时选择了 `Claude Code`，那么 `帮我解释这段代码` 会直接走 Claude Code
 
 ## 说明
 
@@ -91,6 +112,7 @@ Claude Code 会读取 [.mcp.json](/e:/play/wechat-agent-channel/.mcp.json)，启
 - 微信消息通过 `ilink/bot/getupdates` 长轮询接收，不是 WebSocket
 - Claude Code 走 MCP channel
 - Codex 走 `codex app-server`
+- 默认 provider 通过本地配置或环境变量 `WECHAT_AGENT_PROVIDER` 控制
 - Codex 会话映射保存在 [sessions/codex-threads.json](/e:/play/wechat-agent-channel/sessions/codex-threads.json)
 - 回复会截断到 1000 字以内
 
