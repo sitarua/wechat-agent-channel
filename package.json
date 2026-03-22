@@ -2,8 +2,8 @@
   "name": "wechat-agent-channel",
   "version": "1.1.0",
   "scripts": {
-    "start": "python server.py",
-    "setup": "python setup.py"
+    "start": "node scripts/run-python.js server.py",
+    "setup": "node scripts/run-python.js setup.py"
   },
   "dependencies": {
     "qrcode-terminal": "^0.12.0"

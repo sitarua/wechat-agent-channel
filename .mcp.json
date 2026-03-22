@@ -1,8 +1,7 @@
 {
-  "mcpServers": {
-    "wechat": {
-      "command": "python",
-      "args": ["./server.py"]
-    }
+  "wechat": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/run-python.js", "server.py"]
   }
 }

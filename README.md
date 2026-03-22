@@ -39,6 +39,11 @@ npm install -g @anthropic-ai/claude-code
 npm install
 ```
 
+项目会自动探测可用的 Python 解释器：
+
+- macOS / Linux：优先 `python3`，其次 `python`
+- Windows：优先 `py -3`，其次 `python`
+
 ### 首次使用
 
 先确认 CLI 能正常启动：
@@ -79,6 +84,9 @@ npm start
 ```bash
 claude --dangerously-load-development-channels server:wechat
 ```
+
+说明：仓库根目录的 `.mcp.json` 使用的是 Claude 插件/开发 channel 所需格式，适合放在 `~/.claude/plugins/wechat-agent-channel` 下运行。
+同时它会通过 `node scripts/run-python.js` 自动兼容 macOS 上常见的仅有 `python3` 的环境。
 
 ### 怎么用
 
@@ -155,6 +163,11 @@ Install project dependencies:
 npm install
 ```
 
+The project auto-detects a working Python interpreter:
+
+- macOS / Linux: prefer `python3`, then `python`
+- Windows: prefer `py -3`, then `python`
+
 ### First-time setup
 
 Make sure the CLIs can start:
@@ -195,6 +208,9 @@ If your default provider is `Claude Code`:
 ```bash
 claude --dangerously-load-development-channels server:wechat
 ```
+
+Note: the repository-level `.mcp.json` uses the Claude plugin/development channel schema, so this repo is meant to run from `~/.claude/plugins/wechat-agent-channel`.
+It also starts Python through `node scripts/run-python.js`, which keeps macOS setups working when only `python3` is available.
 
 ### How to use it
 
