@@ -29,7 +29,7 @@ cd wechat-agent-channel
 - Node.js 18+
 - `@anthropic-ai/claude-code`
 - `@openai/codex`
-- 微信 ClawBot 的 `BOT_TOKEN`
+- 微信 iOS 版 ClawBot
 
 安装 CLI：
 
@@ -49,21 +49,23 @@ npm install
 ```bash
 claude
 codex
+npm run setup
 ```
 
-## 配置
+`npm run setup` 会显示二维码，用微信扫码并确认后，微信登录凭据会自动保存到本地。
 
-Windows:
+默认凭据位置：
 
-```cmd
-set BOT_TOKEN=你的token
+```text
+~/.wechat-agent-channel/wechat/account.json
 ```
 
-macOS / Linux:
+## 可选配置
 
-```bash
-export BOT_TOKEN=你的token
-```
+如果你想手动覆盖登录凭据，也支持环境变量：
+
+- `BOT_TOKEN`
+- `WECHAT_BASE_URL`
 
 ## 启动
 
@@ -85,6 +87,8 @@ Claude Code 会读取 [.mcp.json](/e:/play/wechat-agent-channel/.mcp.json)，启
 
 ## 说明
 
+- 微信默认使用本地保存的登录凭据；如果设置了 `BOT_TOKEN`，则优先使用环境变量
+- 微信消息通过 `ilink/bot/getupdates` 长轮询接收，不是 WebSocket
 - Claude Code 走 MCP channel
 - Codex 走 `codex app-server`
 - Codex 会话映射保存在 [sessions/codex-threads.json](/e:/play/wechat-agent-channel/sessions/codex-threads.json)

@@ -1,2 +1,2 @@
-export const BASE_URL = "https://ilinkai.weixin.qq.com";
-export const BOT_TOKEN = process.env.BOT_TOKEN;
+export { DEFAULT_BASE_URL } from "./credentials.js";
+export { getCredentialsFile, loadAccount, saveAccount } from "./credentials.js";

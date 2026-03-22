@@ -1,13 +1,29 @@
 import fetch from "node-fetch";
-import { BASE_URL, BOT_TOKEN } from "./config.js";
+import { loadAccount } from "./config.js";
 
 const CHANNEL_VERSION = "0.1.0";
 const LONG_POLL_TIMEOUT_MS = 35_000;
 
+function randomWechatUin() {
+  const value = Math.floor(Math.random() * 0xffffffff);
+  return Buffer.from(String(value), "utf-8").toString("base64");
+}
+
+function getAccount() {
+  const account = loadAccount();
+  if (!account?.token) {
+    throw new Error("未找到微信登录凭据，请先运行 `npm run setup` 或设置 BOT_TOKEN");
+  }
+  return account;
+}
+
 function buildHeaders(body = "") {
+  const account = getAccount();
   return {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${BOT_TOKEN}`,
+    AuthorizationType: "ilink_bot_token",
+    Authorization: `Bearer ${account.token}`,
+    "X-WECHAT-UIN": randomWechatUin(),
     "Content-Length": String(Buffer.byteLength(body, "utf-8")),
   };
 }
@@ -18,6 +34,7 @@ function buildHeaders(body = "") {
  * @returns WeChat API 原始响应（含 msgs、get_updates_buf 等）
  */
 export async function getUpdates(getUpdatesBuf = "") {
+  const account = getAccount();
   const body = JSON.stringify({
     get_updates_buf: getUpdatesBuf,
     base_info: { channel_version: CHANNEL_VERSION },
@@ -28,7 +45,7 @@ export async function getUpdates(getUpdatesBuf = "") {
   const timer = setTimeout(() => controller.abort(), LONG_POLL_TIMEOUT_MS + 5_000);
 
   try {
-    const res = await fetch(`${BASE_URL}/ilink/bot/getupdates`, {
+    const res = await fetch(`${account.baseUrl}/ilink/bot/getupdates`, {
       method: "POST",
       headers: buildHeaders(body),
       body,
@@ -53,9 +70,10 @@ export async function getUpdates(getUpdatesBuf = "") {
  * @param {string} text - 要发送的文本内容
  */
 export async function sendMessage(context_token, text) {
+  const account = getAccount();
   const body = JSON.stringify({ context_token, content: text });
 
-  const res = await fetch(`${BASE_URL}/ilink/bot/sendmessage`, {
+  const res = await fetch(`${account.baseUrl}/ilink/bot/sendmessage`, {
     method: "POST",
     headers: buildHeaders(body),
     body,

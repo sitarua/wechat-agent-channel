@@ -11,6 +11,7 @@ import { getUpdates, sendMessage } from "./wechat.js";
 import { routeTask } from "./router.js";
 import { addTask } from "./queue.js";
 import { run as runCodex } from "./sessions/codex-session.js";
+import { getCredentialsFile, loadAccount } from "./config.js";
 
 const CHANNEL_NAME = "wechat";
 const CHANNEL_VERSION = "0.1.0";
@@ -230,8 +231,14 @@ function sleep(ms) {
 // ── 入口 ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  if (!process.env.BOT_TOKEN) {
-    log("⚠️  警告：BOT_TOKEN 环境变量未设置，微信 API 请求将会失败");
+  const account = loadAccount();
+  if (!account) {
+    log(`⚠️  未找到微信登录凭据，请先运行 npm run setup 或设置 BOT_TOKEN`);
+    log(`凭据文件位置: ${getCredentialsFile()}`);
+  } else if (account.source === "env") {
+    log("使用环境变量 BOT_TOKEN 登录微信");
+  } else {
+    log(`使用本地微信登录凭据${account.accountId ? `: ${account.accountId}` : ""}`);
   }
 
   // 先建立 MCP 连接（Claude Code 等待 stdio 握手）
