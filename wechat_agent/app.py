@@ -4,12 +4,13 @@ import signal
 import threading
 import sys
 import time
+from uuid import uuid4
 
 from .codex import CodexRunner
 from .opencode import OpenCodeRunner
 from .constants import BACKOFF_DELAY_MS, MAX_CONSECUTIVE_FAILURES, RETRY_DELAY_MS
 from .lock import SingleInstanceLock
-from .media import build_prompt, parse_inbound_message
+from .media import parse_inbound_message
 from .state import (
     CODEX_THREAD_STORE_FILE,
     INSTANCE_LOCK_FILE,
@@ -25,9 +26,6 @@ from .util import log, sleep_ms
 from .wechat import WechatClient
 
 
-ATTACHMENT_COALESCE_WINDOW_MS = 1800
-
-
 SESSION_COMMAND_ALIASES = {
     "new": ["/new", "/新建", "/新任务", "新建会话", "新任务", "新会话", "开始新任务"],
     "list": ["/list", "/列表", "/会话列表", "会话列表", "列出会话"],
@@ -36,6 +34,93 @@ SESSION_COMMAND_ALIASES = {
     "delete": ["/delete", "/删除", "/删除会话", "删除会话"],
     "clear": ["/clear", "/清空", "/清空会话", "清空会话", "清空历史会话"],
 }
+
+MESSAGE_BINDING_TTL_SECONDS = 60 * 30
+MESSAGE_BINDING_MAX_ITEMS = 2000
+
+
+def _safe_int_text(value):
+    if value is None:
+        return "0"
+    text = str(value).strip()
+    if not text:
+        return "0"
+    return text
+
+
+def _trim_token(value, size):
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    return text[:size]
+
+
+def _build_msg_key(msg, sender_id, context_token):
+    message_id = _safe_int_text(msg.get("message_id"))
+    seq = _safe_int_text(msg.get("seq"))
+    create_time_ms = _safe_int_text(msg.get("create_time_ms"))
+    client_id = _trim_token(msg.get("client_id"), 8)
+    ctx = _trim_token(context_token, 8)
+    sender = _trim_token(str(sender_id or "").split("@")[0], 12)
+    nonce = uuid4().hex[:6]
+    return f"{sender}|mid:{message_id}|seq:{seq}|ts:{create_time_ms}|ctx:{ctx}|cid:{client_id}|n:{nonce}"
+
+
+def _provider_session_binding(provider, sender_id, codex_runner, opencode_runner):
+    runner = None
+    if provider == "codex":
+        runner = codex_runner
+    elif provider == "opencode":
+        runner = opencode_runner
+    if runner is None:
+        return {"session_key": "-", "session_name": "-", "engine_id": "-"}
+
+    try:
+        session = runner.get_current_session(sender_id)
+    except Exception:
+        session = None
+
+    if not isinstance(session, dict):
+        return {"session_key": "-", "session_name": "-", "engine_id": "-"}
+
+    return {
+        "session_key": str(session.get("key") or "-"),
+        "session_name": str(session.get("name") or "-"),
+        "engine_id": str(session.get("engineId") or "-"),
+    }
+
+
+def _format_session_binding(binding):
+    data = binding if isinstance(binding, dict) else {}
+    return (
+        f"session_key={data.get('session_key', '-')}"
+        f" session_name={data.get('session_name', '-')}"
+        f" engine_id={data.get('engine_id', '-')}"
+    )
+
+
+def _upsert_message_binding(store, msg_key, provider, sender_id, context_token, has_media, session_binding):
+    store[msg_key] = {
+        "provider": provider,
+        "sender_id": sender_id,
+        "context_token": str(context_token or ""),
+        "has_media": bool(has_media),
+        "session_key": (session_binding or {}).get("session_key", "-"),
+        "session_name": (session_binding or {}).get("session_name", "-"),
+        "engine_id": (session_binding or {}).get("engine_id", "-"),
+        "updated_at": time.time(),
+    }
+
+    cutoff = time.time() - MESSAGE_BINDING_TTL_SECONDS
+    stale_keys = [key for key, value in store.items() if float(value.get("updated_at") or 0) < cutoff]
+    for key in stale_keys:
+        store.pop(key, None)
+
+    if len(store) > MESSAGE_BINDING_MAX_ITEMS:
+        ordered = sorted(store.items(), key=lambda item: float(item[1].get("updated_at") or 0))
+        for key, _ in ordered[: len(store) - MESSAGE_BINDING_MAX_ITEMS]:
+            store.pop(key, None)
+
 
 def _parse_session_command(text):
     stripped = str(text or "").strip()
@@ -67,18 +152,6 @@ def _log_prompt_dispatch(provider, sender_id, prompt):
     if len(preview) > 300:
         preview = preview[:300] + "..."
     log(f"[{provider}] 发给 {sender_id.split('@')[0]} 的 prompt: {preview}")
-
-
-def _store_pending_attachment(pending, provider, sender_id, inbound, context_token):
-    pending[(provider, sender_id)] = {
-        "inbound": inbound,
-        "context_token": context_token,
-        "created_at": time.monotonic(),
-    }
-
-
-def _pop_pending_attachment(pending, provider, sender_id):
-    return pending.pop((provider, sender_id), None)
 
 
 def _register_exit_handlers(lock):
@@ -149,14 +222,28 @@ def main():
     opencode_runner = OpenCodeRunner(OPENCODE_SESSION_STORE_FILE)
 
     task_queue = queue.Queue()
-    pending_attachments = {}
+    message_bindings = {}
+    message_bindings_lock = threading.Lock()
     _create_worker(task_queue)
 
-    def send_provider_result(provider, sender_id, result, context_token=None):
+    def record_message_binding(msg_key, provider, sender_id, context_token, has_media, session_binding):
+        with message_bindings_lock:
+            _upsert_message_binding(
+                message_bindings,
+                msg_key,
+                provider,
+                sender_id,
+                context_token,
+                has_media,
+                session_binding,
+            )
+
+    def send_provider_result(provider, sender_id, result, context_token=None, msg_key=None):
         sender = sender_id.split("@")[0]
         ctx = context_token
         if not ctx:
-            log(f"[{provider}] 已拿到结果，但无法回复 {sender}：缺少 context_token")
+            msg_tag = f" msg_key={msg_key}" if msg_key else ""
+            log(f"[{provider}] 已拿到结果，但无法回复 {sender}：缺少 context_token{msg_tag}")
             return
 
         response = wechat_client.send_message(sender_id, ctx, result[:1000])
@@ -164,30 +251,61 @@ def main():
         if isinstance(response, dict):
             message_id = response.get("message_id") or response.get("msg_id")
 
+        msg_tag = f" msg_key={msg_key}" if msg_key else ""
         if message_id:
-            log(f"[{provider}] 已回复 {sender}，message_id={message_id}")
+            log(f"[{provider}] 已回复 {sender}，message_id={message_id}{msg_tag}")
         else:
-                log(f"[{provider}] 已回复 {sender}，sendMessage 返回: {response}")
+            log(f"[{provider}] 已回复 {sender}，sendMessage 返回: {response}{msg_tag}")
 
-    def enqueue_provider_task(provider, sender_id, inbound, context_token):
+    def enqueue_provider_task(provider, sender_id, inbound, context_token, msg_key, session_binding):
         if provider == "codex":
 
-            def codex_task(sender_id=sender_id, inbound=inbound, context_token=context_token):
-                log(f"[codex] 处理来自 {sender_id.split('@')[0]} 的消息...")
+            def codex_task(
+                sender_id=sender_id,
+                inbound=inbound,
+                context_token=context_token,
+                msg_key=msg_key,
+                session_binding=session_binding,
+            ):
+                log(
+                    f"[codex] 开始处理 from={sender_id.split('@')[0]} msg_key={msg_key} "
+                    + _format_session_binding(session_binding)
+                )
                 log("[codex] 已转交 Codex，会在拿到结果后自动回复微信")
                 prompt = inbound.prompt
                 _log_prompt_dispatch("codex", sender_id, prompt)
                 result = codex_runner.run(sender_id, prompt)
-                log(f"[codex] 已收到结果，准备回复 {sender_id.split('@')[0]}")
-                send_provider_result("codex", sender_id, result, context_token=context_token)
+                final_binding = _provider_session_binding("codex", sender_id, codex_runner, opencode_runner)
+                record_message_binding(
+                    msg_key,
+                    "codex",
+                    sender_id,
+                    context_token,
+                    inbound.has_media,
+                    final_binding,
+                )
+                log(
+                    f"[codex] 已收到结果，准备回复 {sender_id.split('@')[0]} msg_key={msg_key} "
+                    + _format_session_binding(final_binding)
+                )
+                send_provider_result("codex", sender_id, result, context_token=context_token, msg_key=msg_key)
 
             task_queue.put(codex_task)
             return
 
         if provider == "opencode":
 
-            def opencode_task(sender_id=sender_id, inbound=inbound, context_token=context_token):
-                log(f"[opencode] 处理来自 {sender_id.split('@')[0]} 的消息...")
+            def opencode_task(
+                sender_id=sender_id,
+                inbound=inbound,
+                context_token=context_token,
+                msg_key=msg_key,
+                session_binding=session_binding,
+            ):
+                log(
+                    f"[opencode] 开始处理 from={sender_id.split('@')[0]} msg_key={msg_key} "
+                    + _format_session_binding(session_binding)
+                )
                 log("[opencode] 已转交 OpenCode，会在拿到结果后自动回复微信")
                 waiting_notice_done = threading.Event()
 
@@ -199,6 +317,7 @@ def main():
                         sender_id,
                         "OpenCode 正在处理中，首次回复可能会慢一些，我拿到结果后继续发你。",
                         context_token=context_token,
+                        msg_key=msg_key,
                     )
 
                 threading.Thread(
@@ -210,35 +329,24 @@ def main():
                 _log_prompt_dispatch("opencode", sender_id, prompt)
                 result = opencode_runner.run(sender_id, prompt)
                 waiting_notice_done.set()
-                log(f"[opencode] 已收到结果，准备回复 {sender_id.split('@')[0]}")
-                send_provider_result("opencode", sender_id, result, context_token=context_token)
+                final_binding = _provider_session_binding("opencode", sender_id, codex_runner, opencode_runner)
+                record_message_binding(
+                    msg_key,
+                    "opencode",
+                    sender_id,
+                    context_token,
+                    inbound.has_media,
+                    final_binding,
+                )
+                log(
+                    f"[opencode] 已收到结果，准备回复 {sender_id.split('@')[0]} msg_key={msg_key} "
+                    + _format_session_binding(final_binding)
+                )
+                send_provider_result("opencode", sender_id, result, context_token=context_token, msg_key=msg_key)
 
             task_queue.put(opencode_task)
 
-    def arm_pending_attachment_flush(provider, sender_id):
-        entry = pending_attachments.get((provider, sender_id))
-        if not entry:
-            return
-        created_at = entry["created_at"]
-
-        def flush_when_due():
-            time.sleep(ATTACHMENT_COALESCE_WINDOW_MS / 1000)
-            pending = pending_attachments.get((provider, sender_id))
-            if not pending or pending["created_at"] != created_at:
-                return
-            pending = pending_attachments.pop((provider, sender_id), None)
-            if not pending:
-                return
-            log(f"[{provider}] 纯附件消息等待补充文字超时，开始直接处理 {sender_id.split('@')[0]}")
-            enqueue_provider_task(provider, sender_id, pending["inbound"], pending["context_token"])
-
-        threading.Thread(
-            target=flush_when_due,
-            name=f"{provider}-attachment-coalesce",
-            daemon=True,
-        ).start()
-
-    def handle_session_command(sender_id, text, context_token):
+    def handle_session_command(sender_id, text, context_token, msg_key):
         parsed = _parse_session_command(text)
         if not parsed:
             return False
@@ -251,7 +359,13 @@ def main():
             runner = opencode_runner
 
         if runner is None:
-            send_provider_result("system", sender_id, "当前 provider 不支持会话命令。", context_token=context_token)
+            send_provider_result(
+                "system",
+                sender_id,
+                "当前 provider 不支持会话命令。",
+                context_token=context_token,
+                msg_key=msg_key,
+            )
             return True
 
         action = parsed["action"]
@@ -259,7 +373,6 @@ def main():
 
         if action == "new":
             session = runner.create_session(sender_id, name=arg or None)
-            _pop_pending_attachment(pending_attachments, provider_label, sender_id)
             reply = f"已创建新会话：{session['name']}\n下一条普通消息会在这个会话里开始。"
         elif action == "list":
             sessions = runner.list_sessions(sender_id)
@@ -284,7 +397,6 @@ def main():
                 if not session:
                     reply = f"未找到会话：{arg}"
                 else:
-                    _pop_pending_attachment(pending_attachments, provider_label, sender_id)
                     current = runner.get_current_session(sender_id)
                     if current:
                         reply = f"已删除会话：{session['name']}\n当前已切换到：{current['name']}"
@@ -293,7 +405,6 @@ def main():
         elif action == "clear":
             count = runner.clear_sessions(sender_id)
             if count:
-                _pop_pending_attachment(pending_attachments, provider_label, sender_id)
                 reply = f"已清空全部会话，共删除 {count} 个会话。\n下一条普通消息会自动创建默认会话。"
             else:
                 reply = "当前没有可清空的会话。"
@@ -305,11 +416,10 @@ def main():
                 if not session:
                     reply = f"未找到会话：{arg}"
                 else:
-                    _pop_pending_attachment(pending_attachments, provider_label, sender_id)
                     reply = f"已切换到会话：{session['name']}\n下一条普通消息会继续这个会话。"
 
         log(f"[session] {provider_label} command handled for {sender_id.split('@')[0]}: {action} {arg}".strip())
-        send_provider_result("session", sender_id, reply, context_token=context_token)
+        send_provider_result("session", sender_id, reply, context_token=context_token, msg_key=msg_key)
         return True
 
     get_updates_buf = ""
@@ -365,39 +475,40 @@ def main():
 
                 sender_id = msg.get("from_user_id") or "unknown"
                 context_token = msg.get("context_token")
+                msg_key = _build_msg_key(msg, sender_id, context_token)
+                session_binding = _provider_session_binding(default_provider, sender_id, codex_runner, opencode_runner)
+                record_message_binding(
+                    msg_key,
+                    default_provider,
+                    sender_id,
+                    context_token,
+                    inbound.has_media,
+                    session_binding,
+                )
                 if not context_token:
-                    log(f"收到消息但缺少 context_token: from={sender_id.split('@')[0]}，后续可能无法自动回复")
+                    log(
+                        f"收到消息但缺少 context_token: from={sender_id.split('@')[0]} "
+                        f"msg_key={msg_key}，后续可能无法自动回复"
+                    )
 
                 preview = inbound.text[:60] if inbound.text else "[附件消息]"
                 log(
-                    f"收到消息: from={sender_id.split('@')[0]} text={preview}"
+                    f"收到消息: from={sender_id.split('@')[0]} msg_key={msg_key} text={preview} "
+                    + _format_session_binding(session_binding)
                     + (f" images={len(inbound.images)} files={len(inbound.files)}" if inbound.has_media else "")
                 )
 
-                if inbound.text and handle_session_command(sender_id, inbound.text, context_token):
+                if inbound.text and handle_session_command(sender_id, inbound.text, context_token, msg_key):
                     continue
 
-                provider_key = default_provider
-                if inbound.has_media and not inbound.text:
-                    _store_pending_attachment(pending_attachments, provider_key, sender_id, inbound, context_token)
-                    arm_pending_attachment_flush(provider_key, sender_id)
-                    log(
-                        f"[{provider_key}] 已缓存来自 {sender_id.split('@')[0]} 的纯附件消息，等待补充文字后合并处理"
-                    )
-                    continue
-                elif not inbound.has_media and inbound.text:
-                    pending = _pop_pending_attachment(pending_attachments, provider_key, sender_id)
-                    if pending:
-                        pending_inbound = pending["inbound"]
-                        inbound.images = pending_inbound.images
-                        inbound.files = pending_inbound.files
-                        inbound.prompt = build_prompt(
-                            inbound.text,
-                            images=inbound.images,
-                            files=inbound.files,
-                        )
-
-                enqueue_provider_task(default_provider, sender_id, inbound, context_token)
+                enqueue_provider_task(
+                    default_provider,
+                    sender_id,
+                    inbound,
+                    context_token,
+                    msg_key,
+                    session_binding,
+                )
 
         except KeyboardInterrupt:
             raise
