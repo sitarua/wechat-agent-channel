@@ -270,7 +270,25 @@ def main():
                     def opencode_task(sender_id=sender_id, text=text, context_token=context_token):
                         log(f"[opencode] 处理来自 {sender_id.split('@')[0]} 的消息...")
                         log("[opencode] 已转交 OpenCode，会在拿到结果后自动回复微信")
+                        waiting_notice_done = threading.Event()
+
+                        def opencode_waiting_notice():
+                            if waiting_notice_done.wait(8):
+                                return
+                            send_provider_result(
+                                "opencode",
+                                sender_id,
+                                "OpenCode 正在处理中，首次回复可能会慢一些，我拿到结果后继续发你。",
+                                context_token=context_token,
+                            )
+
+                        threading.Thread(
+                            target=opencode_waiting_notice,
+                            name="opencode-waiting-notice",
+                            daemon=True,
+                        ).start()
                         result = opencode_runner.run(sender_id, text)
+                        waiting_notice_done.set()
                         log(f"[opencode] 已收到结果，准备回复 {sender_id.split('@')[0]}")
                         send_provider_result("opencode", sender_id, result, context_token=context_token)
 

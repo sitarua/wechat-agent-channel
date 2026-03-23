@@ -1,7 +1,10 @@
 import json
 import os
+import queue
+import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from .constants import DEFAULT_OPENCODE_TIMEOUT_MS
@@ -16,6 +19,7 @@ class OpenCodeRunner:
         self._lock = threading.Lock()
         self.timeout_ms = self._get_timeout_ms()
         self.model = os.environ.get("OPENCODE_MODEL", "").strip()
+        self.enable_thinking = os.environ.get("OPENCODE_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
         self.session_store = MultiSessionStore(self.store_file)
 
     def _get_timeout_ms(self):
@@ -30,10 +34,24 @@ class OpenCodeRunner:
 
     def _resolve_command(self):
         override = os.environ.get("OPENCODE_BIN", "").strip()
-        return override if override else "opencode"
+        if override:
+            return override
+
+        candidates = ["opencode"]
+        if os.name == "nt":
+            candidates = ["opencode.cmd", "opencode.exe", "opencode"]
+
+        for candidate in candidates:
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+
+        return "opencode"
 
     def _build_args(self, session_id, prompt):
-        args = [self._resolve_command(), "run", "--format", "json", "--thinking"]
+        args = [self._resolve_command(), "run", "--format", "json"]
+        if self.enable_thinking:
+            args.append("--thinking")
         if session_id:
             args.extend(["--session", session_id])
         if self.model:
@@ -41,23 +59,115 @@ class OpenCodeRunner:
         args.extend(["--dir", str(Path.cwd()), prompt])
         return args
 
+    @staticmethod
+    def _reader_thread(pipe, output_queue, stream_name):
+        buffer = b""
+        try:
+            while True:
+                chunk = pipe.read1(4096) if hasattr(pipe, "read1") else pipe.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    raw_line, buffer = buffer.split(b"\n", 1)
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
+                    output_queue.put((stream_name, line))
+            if buffer:
+                line = buffer.decode("utf-8", errors="replace").rstrip("\r")
+                output_queue.put((stream_name, line))
+        finally:
+            output_queue.put((stream_name, None))
+
+    @staticmethod
+    def _event_part(event):
+        part = event.get("part")
+        if isinstance(part, dict):
+            return part
+        properties = event.get("properties")
+        if isinstance(properties, dict):
+            nested = properties.get("part")
+            if isinstance(nested, dict):
+                return nested
+        return {}
+
+    @staticmethod
+    def _event_properties(event):
+        properties = event.get("properties")
+        return properties if isinstance(properties, dict) else {}
+
+    @staticmethod
+    def _merge_text_part(order, store, part_id, text, append=False):
+        if not isinstance(text, str) or not text:
+            return
+        key = part_id if isinstance(part_id, str) and part_id else f"inline:{len(order)}"
+        if key not in order:
+            order.append(key)
+        if append:
+            store[key] = store.get(key, "") + text
+        else:
+            store[key] = text
+
     def _run_once(self, user_id, user_message, session_id=None):
-        completed = subprocess.run(
+        process = subprocess.Popen(
             self._build_args(session_id, user_message),
             cwd=Path.cwd(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=self.timeout_ms / 1000,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             shell=False,
+            bufsize=0,
         )
 
         next_session_id = session_id
-        text_parts = []
+        text_order = []
+        text_parts = {}
         errors = []
+        stderr_lines = []
+        saw_step_finish = False
+        deadline = time.monotonic() + (self.timeout_ms / 1000)
+        output_queue = queue.Queue()
 
-        for line in completed.stdout.splitlines():
+        assert process.stdout is not None
+        assert process.stderr is not None
+        threading.Thread(
+            target=self._reader_thread,
+            args=(process.stdout, output_queue, "stdout"),
+            name="opencode-stdout-reader",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._reader_thread,
+            args=(process.stderr, output_queue, "stderr"),
+            name="opencode-stderr-reader",
+            daemon=True,
+        ).start()
+
+        closed_streams = set()
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                raise subprocess.TimeoutExpired(process.args, self.timeout_ms / 1000)
+
+            try:
+                stream_name, line = output_queue.get(timeout=min(remaining, 1))
+            except queue.Empty:
+                if process.poll() is not None and closed_streams.issuperset({"stdout", "stderr"}):
+                    break
+                continue
+
+            if line is None:
+                closed_streams.add(stream_name)
+                if process.poll() is not None and closed_streams.issuperset({"stdout", "stderr"}):
+                    break
+                continue
+
+            if stream_name == "stderr":
+                stripped_err = line.strip()
+                if stripped_err:
+                    stderr_lines.append(stripped_err)
+                continue
+
             stripped = line.strip()
             if not stripped:
                 continue
@@ -67,36 +177,75 @@ class OpenCodeRunner:
                 continue
 
             event_type = event.get("type")
-            part = event.get("part") or {}
+            part = self._event_part(event)
+            properties = self._event_properties(event)
+
+            session_candidate = None
+            if isinstance(event.get("sessionID"), str) and event.get("sessionID").strip():
+                session_candidate = event.get("sessionID").strip()
+            elif isinstance(part.get("sessionID"), str) and part.get("sessionID").strip():
+                session_candidate = part.get("sessionID").strip()
+            elif isinstance(properties.get("sessionID"), str) and properties.get("sessionID").strip():
+                session_candidate = properties.get("sessionID").strip()
+            if session_candidate:
+                next_session_id = session_candidate
 
             if event_type == "step_start":
-                session_candidate = part.get("sessionID")
-                if isinstance(session_candidate, str) and session_candidate.strip():
-                    next_session_id = session_candidate.strip()
+                continue
             elif event_type == "text":
-                text = part.get("text")
-                if isinstance(text, str) and text:
-                    text_parts.append(text)
+                self._merge_text_part(text_order, text_parts, part.get("id"), part.get("text"))
+            elif event_type == "message.part.updated":
+                if part.get("type") == "text":
+                    self._merge_text_part(text_order, text_parts, part.get("id"), part.get("text"))
+                elif part.get("type") == "step-finish":
+                    saw_step_finish = True
+            elif event_type == "message.part.delta":
+                if properties.get("field") == "text":
+                    self._merge_text_part(
+                        text_order,
+                        text_parts,
+                        properties.get("partID"),
+                        properties.get("delta"),
+                        append=True,
+                    )
+            elif event_type == "message.updated":
+                info = properties.get("info")
+                if isinstance(info, dict):
+                    for item in info.get("parts") or []:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            self._merge_text_part(text_order, text_parts, item.get("id"), item.get("text"))
+                    if info.get("finish"):
+                        saw_step_finish = True
+            elif event_type == "step_finish":
+                saw_step_finish = True
             elif event_type == "error":
                 errors.append(self._extract_error_message(event))
+
+            if saw_step_finish:
+                break
+
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
         if next_session_id:
             with self._lock:
                 self.session_store.set_current_engine_id(user_id, next_session_id)
                 self.session_store.save()
 
-        result_text = "".join(text_parts).strip()
-        if completed.returncode == 0 and result_text:
+        result_text = "".join(text_parts.get(item_id, "") for item_id in text_order).strip()
+        if result_text:
             return result_text
 
-        stderr_text = completed.stderr.strip()
-        error_message = result_text or (errors[-1] if errors else "")
-        if not error_message and stderr_text:
-            lines = [line.strip() for line in stderr_text.splitlines() if line.strip()]
-            if lines:
-                error_message = lines[-1]
+        error_message = errors[-1] if errors else ""
+        if not error_message and stderr_lines:
+            error_message = stderr_lines[-1]
 
-        raise RuntimeError(error_message or f"opencode 返回非零退出码: {completed.returncode}")
+        raise RuntimeError(error_message or f"opencode 返回非零退出码: {process.returncode}")
 
     def run(self, user_id, user_message):
         with self._lock:
