@@ -1,6 +1,6 @@
 {
   "name": "wechat-agent-channel",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "scripts": {
     "start": "node scripts/run-python.js server.py",
     "setup": "node scripts/run-python.js setup.py",
