@@ -17,6 +17,7 @@ class McpBridge:
         self._write_lock = threading.Lock()
         self._initialized = False
         self._pending_notifications = []
+        self._transport = None
 
     def start(self):
         thread = threading.Thread(target=self._read_loop, name="mcp-stdio", daemon=True)
@@ -158,9 +159,40 @@ class McpBridge:
             self._send_error(request_id, -32000, str(err))
 
     def _read_message(self):
-        headers = {}
+        if self._transport == "jsonl":
+            return self._read_jsonl_message()
+        if self._transport == "framed":
+            return self._read_framed_message()
+
+        first_line = sys.stdin.buffer.readline()
+        if not first_line:
+            return None
+        if first_line in (b"\r\n", b"\n"):
+            return self._read_message()
+
+        stripped = first_line.lstrip()
+        if stripped.startswith((b"{", b"[")):
+            self._transport = "jsonl"
+            return json.loads(first_line.decode("utf-8"))
+
+        self._transport = "framed"
+        return self._read_framed_message(first_line=first_line)
+
+    def _read_jsonl_message(self):
         while True:
             line = sys.stdin.buffer.readline()
+            if not line:
+                return None
+            if line in (b"\r\n", b"\n"):
+                continue
+            return json.loads(line.decode("utf-8"))
+
+    def _read_framed_message(self, first_line=None):
+        headers = {}
+        line = first_line
+        while True:
+            if line is None:
+                line = sys.stdin.buffer.readline()
             if not line:
                 return None
             if line in (b"\r\n", b"\n"):
@@ -171,6 +203,7 @@ class McpBridge:
             if ":" in decoded:
                 key, value = decoded.split(":", 1)
                 headers[key.strip().lower()] = value.strip()
+            line = None
 
         content_length = int(headers.get("content-length", "0"))
         if content_length <= 0:
@@ -200,6 +233,9 @@ class McpBridge:
         if "jsonrpc" not in message:
             message = {"jsonrpc": "2.0", **message}
         body = json.dumps(message, ensure_ascii=False).encode("utf-8")
-        sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
-        sys.stdout.buffer.write(body)
+        if self._transport == "jsonl":
+            sys.stdout.buffer.write(body + b"\n")
+        else:
+            sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+            sys.stdout.buffer.write(body)
         sys.stdout.buffer.flush()

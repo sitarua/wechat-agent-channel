@@ -2,3 +2,4 @@ node_modules/
 sessions/*.json
 __pycache__/
 logs/
+.claude/

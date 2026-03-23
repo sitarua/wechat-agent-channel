@@ -12,12 +12,6 @@
 
 把微信消息接到本地 AI 编码助手里用。你可以选择把消息转给 `Codex`、`OpenCode` 或 `Claude Code`，然后直接在微信里和它们对话。
 
-### 适合做什么
-
-- 在微信里让 AI 帮你看代码、写脚本、解释仓库
-- 在外面不方便开 IDE 时，继续和本地编码助手协作
-- 在同一套微信入口下切换不同 provider
-
 ### 运行前准备
 
 - Python 3.11+
@@ -44,49 +38,68 @@ npm install
 - macOS / Linux：优先 `python3`，其次 `python`
 - Windows：优先 `py -3`，其次 `python`
 
-### 首次使用
+### Codex / OpenCode
 
 先确认 CLI 能正常启动：
 
 ```bash
 codex
 opencode
-claude
 ```
 
-然后运行初始化：
+初始化：
 
 ```bash
 npm run setup
 ```
 
-初始化会做两件事：
+这条路径只给 `Codex` / `OpenCode` 选择默认 provider。  
+如果你想重新选择一次：
 
-- 显示微信登录二维码，扫码后保存凭据
-- 让你选择默认 provider
+```bash
+npm run setup:reset
+```
 
-可选项：
-
-- `1` -> `Codex`
-- `2` -> `OpenCode`
-- `3` -> `Claude Code`
-
-### 怎么启动
-
-如果默认 provider 是 `Codex` 或 `OpenCode`：
+启动：
 
 ```bash
 npm start
 ```
 
-如果默认 provider 是 `Claude Code`：
+### Claude Plugin Mode
+
+这条路径单独给 `Claude Code` 用，不走主应用的 provider 路由。
+
+1. 微信扫码登录：
+
+```bash
+npm run claude:setup
+```
+
+2. 生成或更新 `.mcp.json`：
+
+```bash
+npm run claude:install
+```
+
+3. 启动 Claude Code：
 
 ```bash
 claude --dangerously-load-development-channels server:wechat
 ```
 
-说明：仓库根目录的 `.mcp.json` 使用的是 Claude 插件/开发 channel 所需格式，适合放在 `~/.claude/plugins/wechat-agent-channel` 下运行。
-同时它会通过 `node scripts/run-python.js` 自动兼容 macOS 上常见的仅有 `python3` 的环境。
+如果你之前已经试过旧版本，先把 Claude Code 会话完全退出再重开。  
+启动后可以用下面这条命令确认 MCP 已连上：
+
+```bash
+claude mcp list
+```
+
+如果之前拒绝过项目里的 `wechat` MCP server，先运行：
+
+```bash
+claude mcp reset-project-choices
+```
 
 ### 怎么用
 
@@ -121,7 +134,7 @@ claude --dangerously-load-development-channels server:wechat
 ### 说明
 
 - `Codex` 和 `OpenCode` 都是本地 CLI 方式运行
-- `Claude Code` 使用官方 Channels 模式
+- `Claude Code` 走独立的 MCP 插件模式
 - 微信登录凭据默认保存在用户目录下
 - 同一时间只建议保留一个运行中的实例
 - 会话命令设计参考了 [chenhg5/cc-connect](https://github.com/chenhg5/cc-connect) 提供的部分思路
@@ -135,12 +148,6 @@ claude --dangerously-load-development-channels server:wechat
 ## English
 
 Use WeChat as a front end for local coding agents. You can route messages to `Codex`, `OpenCode`, or `Claude Code` and talk to them directly from WeChat.
-
-### What it is for
-
-- Ask coding questions from WeChat
-- Continue working with your local agent when you are away from your IDE
-- Switch between multiple coding providers behind the same WeChat entry point
 
 ### Requirements
 
@@ -168,14 +175,13 @@ The project auto-detects a working Python interpreter:
 - macOS / Linux: prefer `python3`, then `python`
 - Windows: prefer `py -3`, then `python`
 
-### First-time setup
+### Codex / OpenCode
 
 Make sure the CLIs can start:
 
 ```bash
 codex
 opencode
-claude
 ```
 
 Then run:
@@ -184,33 +190,51 @@ Then run:
 npm run setup
 ```
 
-Setup does two things:
+This path only manages the default provider for `Codex` / `OpenCode`.  
+To choose again:
 
-- shows a WeChat login QR code and saves credentials
-- asks you to choose the default provider
-
-Options:
-
-- `1` -> `Codex`
-- `2` -> `OpenCode`
-- `3` -> `Claude Code`
-
-### How to start
-
-If your default provider is `Codex` or `OpenCode`:
+```bash
+npm run setup:reset
+```
 
 ```bash
 npm start
 ```
 
-If your default provider is `Claude Code`:
+### Claude Plugin Mode
+
+This path is only for `Claude Code` and does not use the main provider router.
+
+1. WeChat QR login:
+
+```bash
+npm run claude:setup
+```
+
+2. Create or update `.mcp.json`:
+
+```bash
+npm run claude:install
+```
+
+3. Start Claude Code:
 
 ```bash
 claude --dangerously-load-development-channels server:wechat
 ```
 
-Note: the repository-level `.mcp.json` uses the Claude plugin/development channel schema, so this repo is meant to run from `~/.claude/plugins/wechat-agent-channel`.
-It also starts Python through `node scripts/run-python.js`, which keeps macOS setups working when only `python3` is available.
+If you already tried an older build, fully quit Claude Code before starting again.  
+After startup, you can confirm the MCP server is connected with:
+
+```bash
+claude mcp list
+```
+
+If you previously denied the `wechat` MCP server, run:
+
+```bash
+claude mcp reset-project-choices
+```
 
 ### How to use it
 
@@ -245,7 +269,7 @@ The Chinese commands are translated into the matching English intent internally 
 ### Notes
 
 - `Codex` and `OpenCode` run through their local CLIs
-- `Claude Code` uses the official Channels flow
+- `Claude Code` uses a standalone MCP plugin path
 - WeChat credentials are stored in your user directory by default
 - It is best to keep only one running instance at a time
 - The session command UX was partly inspired by [chenhg5/cc-connect](https://github.com/chenhg5/cc-connect)

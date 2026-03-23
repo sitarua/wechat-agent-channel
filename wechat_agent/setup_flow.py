@@ -24,17 +24,20 @@ def fetch_json(url, *, headers=None, timeout_s=15):
         return json.loads(response.read().decode("utf-8"))
 
 
-def prompt_provider():
+def prompt_provider(*, force=False):
     existing_config = load_app_config()
     if existing_config and existing_config.get("defaultProvider"):
-        print(f"当前默认 provider: {existing_config['defaultProvider']}")
-        print(f"配置文件位置: {get_app_config_file()}")
-        return existing_config["defaultProvider"]
+        if not force:
+            print(f"当前默认 provider: {existing_config['defaultProvider']}")
+            print(f"配置文件位置: {get_app_config_file()}")
+            return existing_config["defaultProvider"]
 
-    print("首次启动需要选择默认 provider：")
+        print(f"已忽略当前默认 provider: {existing_config['defaultProvider']}")
+        print(f"配置文件位置: {get_app_config_file()}")
+
+    print("请选择默认 provider：")
     print("1. Codex")
     print("2. OpenCode")
-    print("3. Claude Code")
 
     while True:
         answer = input("请输入 1 或 2: ").strip()
@@ -46,11 +49,7 @@ def prompt_provider():
             save_app_config({"defaultProvider": "opencode"})
             print(f"已保存默认 provider: opencode ({get_app_config_file()})")
             return "opencode"
-        if answer == "3":
-            save_app_config({"defaultProvider": "claude"})
-            print(f"已保存默认 provider: claude ({get_app_config_file()})")
-            return "claude"
-        print("输入无效，请输入 1、2 或 3。")
+        print("输入无效，请输入 1 或 2。")
 
 
 def render_qr_terminal(qr_content):
@@ -102,7 +101,7 @@ def poll_qr_status(base_url, qrcode_id):
         raise
 
 
-def main():
+def main(*, reset_provider=False, select_provider=True):
     configure_stdio()
     print("正在获取微信登录二维码...\n")
     qr_response = fetch_qr_code(DEFAULT_BASE_URL)
@@ -151,7 +150,8 @@ def main():
             if account.get("userId"):
                 print(f"用户 ID: {account['userId']}")
             print(f"凭据已保存到: {get_credentials_file()}")
-            prompt_provider()
+            if select_provider:
+                prompt_provider(force=reset_provider)
             return
 
         time.sleep(1)

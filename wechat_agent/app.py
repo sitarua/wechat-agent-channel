@@ -5,7 +5,6 @@ import threading
 import sys
 
 from .codex import CodexRunner
-from .mcp import McpBridge
 from .opencode import OpenCodeRunner
 from .constants import BACKOFF_DELAY_MS, MAX_CONSECUTIVE_FAILURES, RETRY_DELAY_MS
 from .lock import SingleInstanceLock
@@ -87,7 +86,8 @@ def _log_startup_state():
         log(f"配置文件位置: {get_app_config_file()}")
         log("请运行 npm run setup 完成首次 provider 选择")
     elif app_config.get("defaultProvider") == "claude" and sys.stdin.isatty():
-        log("⚠️  当前默认 provider 是 claude。请使用 `claude --dangerously-load-development-channels server:wechat` 启动。")
+        log("⚠️  当前默认 provider 是 claude，但 Claude 现在走独立插件模式。")
+        log("请运行 `npm run claude:install`，然后用 `claude --dangerously-load-development-channels server:wechat` 启动。")
 
 
 def _create_worker(task_queue):
@@ -114,20 +114,21 @@ def main():
 
     app_config = load_app_config()
     default_provider = route_task((app_config or {}).get("defaultProvider"))
+    if default_provider == "claude":
+        log("Claude Code 已从主应用路径拆出。")
+        log("请运行 `npm run claude:install`，然后用 `claude --dangerously-load-development-channels server:wechat` 启动。")
+        return
 
     wechat_client = WechatClient()
     codex_runner = CodexRunner(CODEX_THREAD_STORE_FILE)
     opencode_runner = OpenCodeRunner(OPENCODE_SESSION_STORE_FILE)
-    context_token_cache = {}
-    mcp_bridge = McpBridge(wechat_client, context_token_cache)
-    mcp_bridge.start()
 
     task_queue = queue.Queue()
     _create_worker(task_queue)
 
     def send_provider_result(provider, sender_id, result, context_token=None):
         sender = sender_id.split("@")[0]
-        ctx = context_token or context_token_cache.get(sender_id)
+        ctx = context_token
         if not ctx:
             log(f"[{provider}] 已拿到结果，但无法回复 {sender}：缺少 context_token")
             return
@@ -246,9 +247,7 @@ def main():
 
                 sender_id = msg.get("from_user_id") or "unknown"
                 context_token = msg.get("context_token")
-                if context_token:
-                    context_token_cache[sender_id] = context_token
-                else:
+                if not context_token:
                     log(f"收到消息但缺少 context_token: from={sender_id.split('@')[0]}，后续可能无法自动回复")
 
                 log(f"收到消息: from={sender_id.split('@')[0]} text={text[:60]}")
@@ -276,13 +275,6 @@ def main():
                         send_provider_result("opencode", sender_id, result, context_token=context_token)
 
                     task_queue.put(opencode_task)
-                else:
-
-                    def claude_task(sender_id=sender_id, text=text):
-                        log(f"[claude] 推送来自 {sender_id.split('@')[0]} 的消息到 Claude Code channel...")
-                        mcp_bridge.notify_claude_channel(text, sender_id)
-
-                    task_queue.put(claude_task)
 
         except KeyboardInterrupt:
             raise
