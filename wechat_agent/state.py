@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 
-from .constants import DEFAULT_BASE_URL, PROJECT_DIR, SUPPORTED_PROVIDERS
+from .constants import DEFAULT_BASE_URL, DEFAULT_CDN_BASE_URL, PROJECT_DIR, SUPPORTED_PROVIDERS
 from .util import ensure_parent, load_json, now_utc_iso
 
 
@@ -35,6 +35,7 @@ def load_account():
         return {
             "token": env_token,
             "baseUrl": os.environ.get("WECHAT_BASE_URL", "").strip() or DEFAULT_BASE_URL,
+            "cdnBaseUrl": os.environ.get("WECHAT_CDN_BASE_URL", "").strip() or DEFAULT_CDN_BASE_URL,
             "source": "env",
         }
 
@@ -49,6 +50,7 @@ def load_account():
     return {
         "token": token,
         "baseUrl": str(parsed.get("baseUrl") or "").strip() or DEFAULT_BASE_URL,
+        "cdnBaseUrl": str(parsed.get("cdnBaseUrl") or "").strip() or DEFAULT_CDN_BASE_URL,
         "accountId": parsed.get("accountId"),
         "userId": parsed.get("userId"),
         "savedAt": parsed.get("savedAt"),

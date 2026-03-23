@@ -32,24 +32,41 @@ class OpenCodeRunner:
         except ValueError:
             return DEFAULT_OPENCODE_TIMEOUT_MS
 
+    @staticmethod
+    def _wrap_powershell_script(script_path):
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        if shell and Path(script_path).exists():
+            return [shell, "-NoProfile", "-File", str(script_path)]
+        return None
+
     def _resolve_command(self):
         override = os.environ.get("OPENCODE_BIN", "").strip()
         if override:
-            return override
+            if os.name == "nt" and override.lower().endswith(".ps1"):
+                wrapped = self._wrap_powershell_script(override)
+                if wrapped:
+                    return wrapped
+            return [override]
 
-        candidates = ["opencode"]
         if os.name == "nt":
+            appdata = os.environ.get("APPDATA", "").strip()
+            if appdata:
+                wrapped = self._wrap_powershell_script(Path(appdata) / "npm" / "opencode.ps1")
+                if wrapped:
+                    return wrapped
             candidates = ["opencode.cmd", "opencode.exe", "opencode"]
+        else:
+            candidates = ["opencode"]
 
         for candidate in candidates:
             resolved = shutil.which(candidate)
             if resolved:
-                return resolved
+                return [resolved]
 
-        return "opencode"
+        return ["opencode"]
 
     def _build_args(self, session_id, prompt):
-        args = [self._resolve_command(), "run", "--format", "json"]
+        args = self._resolve_command() + ["run", "--format", "json"]
         if self.enable_thinking:
             args.append("--thinking")
         if session_id:
@@ -122,7 +139,6 @@ class OpenCodeRunner:
         text_parts = {}
         errors = []
         stderr_lines = []
-        saw_step_finish = False
         deadline = time.monotonic() + (self.timeout_ms / 1000)
         output_queue = queue.Queue()
 
@@ -197,8 +213,6 @@ class OpenCodeRunner:
             elif event_type == "message.part.updated":
                 if part.get("type") == "text":
                     self._merge_text_part(text_order, text_parts, part.get("id"), part.get("text"))
-                elif part.get("type") == "step-finish":
-                    saw_step_finish = True
             elif event_type == "message.part.delta":
                 if properties.get("field") == "text":
                     self._merge_text_part(
@@ -214,15 +228,8 @@ class OpenCodeRunner:
                     for item in info.get("parts") or []:
                         if isinstance(item, dict) and item.get("type") == "text":
                             self._merge_text_part(text_order, text_parts, item.get("id"), item.get("text"))
-                    if info.get("finish"):
-                        saw_step_finish = True
-            elif event_type == "step_finish":
-                saw_step_finish = True
             elif event_type == "error":
                 errors.append(self._extract_error_message(event))
-
-            if saw_step_finish:
-                break
 
         if process.poll() is None:
             process.terminate()
@@ -294,6 +301,20 @@ class OpenCodeRunner:
             if session:
                 self.session_store.save()
             return session
+
+    def delete_session(self, user_id, target):
+        with self._lock:
+            session = self.session_store.delete_session(user_id, target)
+            if session:
+                self.session_store.save()
+            return session
+
+    def clear_sessions(self, user_id):
+        with self._lock:
+            count = self.session_store.clear_sessions(user_id)
+            if count:
+                self.session_store.save()
+            return count
 
     @staticmethod
     def _extract_error_message(raw):

@@ -1,11 +1,12 @@
 import json
 import os
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.request
 
-from .constants import CHANNEL_VERSION, LONG_POLL_TIMEOUT_MS
+from .constants import CHANNEL_VERSION, LONG_POLL_TIMEOUT_MS, MEDIA_CLI_TIMEOUT_MS, PROJECT_DIR
 from .state import load_account
 from .util import random_wechat_uin
 
@@ -126,6 +127,31 @@ class WechatClient:
         self._raise_on_error_response("sendMessage", response)
         return response
 
+    def _run_media_cli(self, command, payload):
+        script_path = PROJECT_DIR / "scripts" / "wechat-media-cli.mjs"
+        process = subprocess.run(
+            ["node", str(script_path), command],
+            input=json.dumps(payload, ensure_ascii=False),
+            cwd=PROJECT_DIR,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=MEDIA_CLI_TIMEOUT_MS / 1000,
+            check=False,
+        )
+        if process.returncode != 0:
+            detail = (process.stderr or process.stdout or "").strip()
+            raise RuntimeError(f"微信媒体桥执行失败: {detail or f'退出码 {process.returncode}'}")
+
+        output = (process.stdout or "").strip()
+        if not output:
+            return {}
+        try:
+            return json.loads(output)
+        except json.JSONDecodeError as err:
+            raise RuntimeError(f"微信媒体桥返回了非法 JSON: {output[:300]}") from err
+
     def send_message(self, to_user_id, context_token, text):
         client_id = f"wechat-agent:{int(time.time() * 1000)}"
         payload = {
@@ -153,6 +179,53 @@ class WechatClient:
             response.setdefault("_client_id", client_id)
             response.setdefault("_payload_variant", "msg_wrapper")
         return response
+
+    def send_media_message(self, to_user_id, context_token, text, media_path):
+        account = self.get_account()
+        return self._run_media_cli(
+            "send-media",
+            {
+                "account": {
+                    "token": account["token"],
+                    "baseUrl": account["baseUrl"],
+                    "cdnBaseUrl": account.get("cdnBaseUrl"),
+                },
+                "toUserId": to_user_id,
+                "contextToken": context_token,
+                "text": text,
+                "mediaPath": media_path,
+                "workDir": str(PROJECT_DIR),
+            },
+        )
+
+    def collect_inbound_media(self, msg):
+        item_list = msg.get("item_list") or []
+        has_media = any(
+            item.get("type") in {2, 3, 4, 5}
+            or (
+                item.get("type") == 1
+                and isinstance(item.get("ref_msg"), dict)
+                and isinstance(item["ref_msg"].get("message_item"), dict)
+                and item["ref_msg"]["message_item"].get("type") in {2, 3, 4, 5}
+            )
+            for item in item_list
+        )
+        if not has_media:
+            return {"images": [], "files": []}
+
+        account = self.get_account()
+        return self._run_media_cli(
+            "collect-inbound",
+            {
+                "account": {
+                    "token": account["token"],
+                    "baseUrl": account["baseUrl"],
+                    "cdnBaseUrl": account.get("cdnBaseUrl"),
+                },
+                "message": msg,
+                "workDir": str(PROJECT_DIR),
+            },
+        )
 
 
 def extract_text(msg):

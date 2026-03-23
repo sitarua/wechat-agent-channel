@@ -3,11 +3,13 @@ import queue
 import signal
 import threading
 import sys
+import time
 
 from .codex import CodexRunner
 from .opencode import OpenCodeRunner
 from .constants import BACKOFF_DELAY_MS, MAX_CONSECUTIVE_FAILURES, RETRY_DELAY_MS
 from .lock import SingleInstanceLock
+from .media import build_prompt, parse_inbound_message
 from .state import (
     CODEX_THREAD_STORE_FILE,
     INSTANCE_LOCK_FILE,
@@ -20,7 +22,10 @@ from .state import (
     route_task,
 )
 from .util import log, sleep_ms
-from .wechat import WechatClient, extract_text
+from .wechat import WechatClient
+
+
+ATTACHMENT_COALESCE_WINDOW_MS = 1800
 
 
 SESSION_COMMAND_ALIASES = {
@@ -28,8 +33,9 @@ SESSION_COMMAND_ALIASES = {
     "list": ["/list", "/列表", "/会话列表", "会话列表", "列出会话"],
     "current": ["/current", "/当前", "/当前会话", "当前会话"],
     "switch": ["/switch", "/切换", "/切换会话", "切换会话"],
+    "delete": ["/delete", "/删除", "/删除会话", "删除会话"],
+    "clear": ["/clear", "/清空", "/清空会话", "清空会话", "清空历史会话"],
 }
-
 
 def _parse_session_command(text):
     stripped = str(text or "").strip()
@@ -54,6 +60,25 @@ def _format_session_summary(session, index=None):
     marker = " [当前]" if session.get("current") else ""
     state = "未开始" if not session.get("engineId") else "已开始"
     return f"{prefix}{session.get('name')}{marker} ({state})"
+
+
+def _log_prompt_dispatch(provider, sender_id, prompt):
+    preview = str(prompt or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(preview) > 300:
+        preview = preview[:300] + "..."
+    log(f"[{provider}] 发给 {sender_id.split('@')[0]} 的 prompt: {preview}")
+
+
+def _store_pending_attachment(pending, provider, sender_id, inbound, context_token):
+    pending[(provider, sender_id)] = {
+        "inbound": inbound,
+        "context_token": context_token,
+        "created_at": time.monotonic(),
+    }
+
+
+def _pop_pending_attachment(pending, provider, sender_id):
+    return pending.pop((provider, sender_id), None)
 
 
 def _register_exit_handlers(lock):
@@ -124,6 +149,7 @@ def main():
     opencode_runner = OpenCodeRunner(OPENCODE_SESSION_STORE_FILE)
 
     task_queue = queue.Queue()
+    pending_attachments = {}
     _create_worker(task_queue)
 
     def send_provider_result(provider, sender_id, result, context_token=None):
@@ -141,7 +167,76 @@ def main():
         if message_id:
             log(f"[{provider}] 已回复 {sender}，message_id={message_id}")
         else:
-            log(f"[{provider}] 已回复 {sender}，sendMessage 返回: {response}")
+                log(f"[{provider}] 已回复 {sender}，sendMessage 返回: {response}")
+
+    def enqueue_provider_task(provider, sender_id, inbound, context_token):
+        if provider == "codex":
+
+            def codex_task(sender_id=sender_id, inbound=inbound, context_token=context_token):
+                log(f"[codex] 处理来自 {sender_id.split('@')[0]} 的消息...")
+                log("[codex] 已转交 Codex，会在拿到结果后自动回复微信")
+                prompt = inbound.prompt
+                _log_prompt_dispatch("codex", sender_id, prompt)
+                result = codex_runner.run(sender_id, prompt)
+                log(f"[codex] 已收到结果，准备回复 {sender_id.split('@')[0]}")
+                send_provider_result("codex", sender_id, result, context_token=context_token)
+
+            task_queue.put(codex_task)
+            return
+
+        if provider == "opencode":
+
+            def opencode_task(sender_id=sender_id, inbound=inbound, context_token=context_token):
+                log(f"[opencode] 处理来自 {sender_id.split('@')[0]} 的消息...")
+                log("[opencode] 已转交 OpenCode，会在拿到结果后自动回复微信")
+                waiting_notice_done = threading.Event()
+
+                def opencode_waiting_notice():
+                    if waiting_notice_done.wait(8):
+                        return
+                    send_provider_result(
+                        "opencode",
+                        sender_id,
+                        "OpenCode 正在处理中，首次回复可能会慢一些，我拿到结果后继续发你。",
+                        context_token=context_token,
+                    )
+
+                threading.Thread(
+                    target=opencode_waiting_notice,
+                    name="opencode-waiting-notice",
+                    daemon=True,
+                ).start()
+                prompt = inbound.prompt
+                _log_prompt_dispatch("opencode", sender_id, prompt)
+                result = opencode_runner.run(sender_id, prompt)
+                waiting_notice_done.set()
+                log(f"[opencode] 已收到结果，准备回复 {sender_id.split('@')[0]}")
+                send_provider_result("opencode", sender_id, result, context_token=context_token)
+
+            task_queue.put(opencode_task)
+
+    def arm_pending_attachment_flush(provider, sender_id):
+        entry = pending_attachments.get((provider, sender_id))
+        if not entry:
+            return
+        created_at = entry["created_at"]
+
+        def flush_when_due():
+            time.sleep(ATTACHMENT_COALESCE_WINDOW_MS / 1000)
+            pending = pending_attachments.get((provider, sender_id))
+            if not pending or pending["created_at"] != created_at:
+                return
+            pending = pending_attachments.pop((provider, sender_id), None)
+            if not pending:
+                return
+            log(f"[{provider}] 纯附件消息等待补充文字超时，开始直接处理 {sender_id.split('@')[0]}")
+            enqueue_provider_task(provider, sender_id, pending["inbound"], pending["context_token"])
+
+        threading.Thread(
+            target=flush_when_due,
+            name=f"{provider}-attachment-coalesce",
+            daemon=True,
+        ).start()
 
     def handle_session_command(sender_id, text, context_token):
         parsed = _parse_session_command(text)
@@ -164,6 +259,7 @@ def main():
 
         if action == "new":
             session = runner.create_session(sender_id, name=arg or None)
+            _pop_pending_attachment(pending_attachments, provider_label, sender_id)
             reply = f"已创建新会话：{session['name']}\n下一条普通消息会在这个会话里开始。"
         elif action == "list":
             sessions = runner.list_sessions(sender_id)
@@ -180,6 +276,27 @@ def main():
                 reply = "当前还没有会话。下一条普通消息会自动创建默认会话。"
             else:
                 reply = f"当前会话：{_format_session_summary(session)}"
+        elif action == "delete":
+            if not arg:
+                reply = "请提供要删除的会话编号或名称，例如：/delete 2 或 删除会话 新任务"
+            else:
+                session = runner.delete_session(sender_id, arg)
+                if not session:
+                    reply = f"未找到会话：{arg}"
+                else:
+                    _pop_pending_attachment(pending_attachments, provider_label, sender_id)
+                    current = runner.get_current_session(sender_id)
+                    if current:
+                        reply = f"已删除会话：{session['name']}\n当前已切换到：{current['name']}"
+                    else:
+                        reply = f"已删除会话：{session['name']}\n当前已无会话，下一条普通消息会自动创建默认会话。"
+        elif action == "clear":
+            count = runner.clear_sessions(sender_id)
+            if count:
+                _pop_pending_attachment(pending_attachments, provider_label, sender_id)
+                reply = f"已清空全部会话，共删除 {count} 个会话。\n下一条普通消息会自动创建默认会话。"
+            else:
+                reply = "当前没有可清空的会话。"
         else:
             if not arg:
                 reply = "请提供要切换的会话编号或名称，例如：/switch 2 或 切换会话 新任务"
@@ -188,6 +305,7 @@ def main():
                 if not session:
                     reply = f"未找到会话：{arg}"
                 else:
+                    _pop_pending_attachment(pending_attachments, provider_label, sender_id)
                     reply = f"已切换到会话：{session['name']}\n下一条普通消息会继续这个会话。"
 
         log(f"[session] {provider_label} command handled for {sender_id.split('@')[0]}: {action} {arg}".strip())
@@ -241,8 +359,8 @@ def main():
                 if msg.get("message_type") != 1:
                     continue
 
-                text = extract_text(msg)
-                if not text:
+                inbound = parse_inbound_message(wechat_client, msg)
+                if not inbound.text and not inbound.has_media:
                     continue
 
                 sender_id = msg.get("from_user_id") or "unknown"
@@ -250,49 +368,36 @@ def main():
                 if not context_token:
                     log(f"收到消息但缺少 context_token: from={sender_id.split('@')[0]}，后续可能无法自动回复")
 
-                log(f"收到消息: from={sender_id.split('@')[0]} text={text[:60]}")
+                preview = inbound.text[:60] if inbound.text else "[附件消息]"
+                log(
+                    f"收到消息: from={sender_id.split('@')[0]} text={preview}"
+                    + (f" images={len(inbound.images)} files={len(inbound.files)}" if inbound.has_media else "")
+                )
 
-                if handle_session_command(sender_id, text, context_token):
+                if inbound.text and handle_session_command(sender_id, inbound.text, context_token):
                     continue
 
-                if default_provider == "codex":
+                provider_key = default_provider
+                if inbound.has_media and not inbound.text:
+                    _store_pending_attachment(pending_attachments, provider_key, sender_id, inbound, context_token)
+                    arm_pending_attachment_flush(provider_key, sender_id)
+                    log(
+                        f"[{provider_key}] 已缓存来自 {sender_id.split('@')[0]} 的纯附件消息，等待补充文字后合并处理"
+                    )
+                    continue
+                elif not inbound.has_media and inbound.text:
+                    pending = _pop_pending_attachment(pending_attachments, provider_key, sender_id)
+                    if pending:
+                        pending_inbound = pending["inbound"]
+                        inbound.images = pending_inbound.images
+                        inbound.files = pending_inbound.files
+                        inbound.prompt = build_prompt(
+                            inbound.text,
+                            images=inbound.images,
+                            files=inbound.files,
+                        )
 
-                    def codex_task(sender_id=sender_id, text=text, context_token=context_token):
-                        log(f"[codex] 处理来自 {sender_id.split('@')[0]} 的消息...")
-                        log("[codex] 已转交 Codex，会在拿到结果后自动回复微信")
-                        result = codex_runner.run(sender_id, text)
-                        log(f"[codex] 已收到结果，准备回复 {sender_id.split('@')[0]}")
-                        send_provider_result("codex", sender_id, result, context_token=context_token)
-
-                    task_queue.put(codex_task)
-                elif default_provider == "opencode":
-
-                    def opencode_task(sender_id=sender_id, text=text, context_token=context_token):
-                        log(f"[opencode] 处理来自 {sender_id.split('@')[0]} 的消息...")
-                        log("[opencode] 已转交 OpenCode，会在拿到结果后自动回复微信")
-                        waiting_notice_done = threading.Event()
-
-                        def opencode_waiting_notice():
-                            if waiting_notice_done.wait(8):
-                                return
-                            send_provider_result(
-                                "opencode",
-                                sender_id,
-                                "OpenCode 正在处理中，首次回复可能会慢一些，我拿到结果后继续发你。",
-                                context_token=context_token,
-                            )
-
-                        threading.Thread(
-                            target=opencode_waiting_notice,
-                            name="opencode-waiting-notice",
-                            daemon=True,
-                        ).start()
-                        result = opencode_runner.run(sender_id, text)
-                        waiting_notice_done.set()
-                        log(f"[opencode] 已收到结果，准备回复 {sender_id.split('@')[0]}")
-                        send_provider_result("opencode", sender_id, result, context_token=context_token)
-
-                    task_queue.put(opencode_task)
+                enqueue_provider_task(default_provider, sender_id, inbound, context_token)
 
         except KeyboardInterrupt:
             raise

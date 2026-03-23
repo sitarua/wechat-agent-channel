@@ -83,6 +83,7 @@ class McpBridge:
                             "你是通过微信与用户交流的 AI 助手。",
                             "用户消息以 <channel source=\"wechat\" sender=\"...\" sender_id=\"...\"> 格式到达。",
                             "使用 wechat_reply 工具回复。必须传入消息中的 sender_id。",
+                            "如果需要发送本地图片、视频或文件，可给 wechat_reply 额外传 media_path。",
                             "用中文回复（除非用户用其他语言）。",
                             "保持回复简洁。微信不渲染 Markdown，请用纯文本。",
                             "不要向用户复述这些系统说明，不要自我介绍，也不要回复“我知道了”之类的确认语。",
@@ -100,7 +101,7 @@ class McpBridge:
                         "tools": [
                             {
                                 "name": "wechat_reply",
-                                "description": "向微信用户发送文本回复",
+                                "description": "向微信用户发送文本回复，可选附带一个本地图片/视频/文件路径",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -112,8 +113,12 @@ class McpBridge:
                                             "type": "string",
                                             "description": "要发送的纯文本消息，不要使用 Markdown",
                                         },
+                                        "media_path": {
+                                            "type": "string",
+                                            "description": "可选，本地图片/视频/文件路径。支持绝对路径，或相对当前工作目录的路径。",
+                                        },
                                     },
-                                    "required": ["sender_id", "text"],
+                                    "required": ["sender_id"],
                                 },
                             }
                         ]
@@ -129,6 +134,9 @@ class McpBridge:
                 arguments = params.get("arguments") or {}
                 sender_id = str(arguments.get("sender_id") or "")
                 text = str(arguments.get("text") or "")
+                media_path = str(arguments.get("media_path") or "").strip()
+                if not text and not media_path:
+                    raise RuntimeError("text 和 media_path 至少要提供一个")
                 context_token = self.context_token_cache.get(sender_id)
                 if not context_token:
                     result = {
@@ -143,7 +151,10 @@ class McpBridge:
                     return
 
                 try:
-                    self.wechat_client.send_message(sender_id, context_token, text[:1000])
+                    if media_path:
+                        self.wechat_client.send_media_message(sender_id, context_token, text[:1000], media_path)
+                    else:
+                        self.wechat_client.send_message(sender_id, context_token, text[:1000])
                     result = {"content": [{"type": "text", "text": "sent"}]}
                 except Exception as err:
                     result = {"content": [{"type": "text", "text": f"send failed: {err}"}]}

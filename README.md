@@ -90,6 +90,15 @@ claude --dangerously-load-development-channels server:wechat
 - `解释一下这个项目怎么启动`
 - `帮我看看这个报错是什么意思`
 
+也可以直接发附件：
+
+- 图片
+- 文件
+- 语音
+- 视频
+
+附件会先保存到当前项目下的 `.wechat-agent/attachments/`，再交给 agent 读取。
+
 如果你已经选了默认 provider，就不用再写前缀。
 
 ### 会话命令
@@ -99,11 +108,14 @@ claude --dangerously-load-development-channels server:wechat
 - `/list` 或 `会话列表`
 - `/current` 或 `当前会话`
 - `/switch 2` 或 `切换会话 2`
+- `/delete 2` 或 `删除会话 2`
+- `/clear` 或 `清空会话`
 
 ### 常用环境变量
 
 - `BOT_TOKEN`
 - `WECHAT_BASE_URL`
+- `WECHAT_CDN_BASE_URL`
 - `WECHAT_AGENT_PROVIDER`
 - `OPENCODE_MODEL`
 - `OPENCODE_TURN_TIMEOUT_MS`
@@ -114,9 +126,14 @@ claude --dangerously-load-development-channels server:wechat
 
 - `Codex` 和 `OpenCode` 走本地 CLI
 - `Claude Code` 走独立 MCP 插件模式
-- `OpenCode` 在微信里默认只返回最终回答；如需保留 thinking，可设置 `OPENCODE_THINKING=1`
+- 当前项目支持把微信图片、文件、语音、视频保存到本地并交给 agent 使用
 - 微信登录凭据默认保存在用户目录下
-- 同一时间建议只保留一个运行中的实例
+
+### 致谢
+
+部分附件处理和接入思路参考了 `cc-connect`：
+
+- https://github.com/chenhg5/cc-connect
 
 [回到顶部](#top)
 
@@ -206,6 +223,15 @@ Examples:
 - `Explain how this project starts`
 - `What does this error mean?`
 
+You can also send attachments:
+
+- Images
+- Files
+- Voice messages
+- Videos
+
+Attachments are first saved to `.wechat-agent/attachments/` in the current project, then handed off to the agent.
+
 If you already chose a default provider, you do not need to add a prefix.
 
 ### Session Commands
@@ -215,11 +241,14 @@ If you already chose a default provider, you do not need to add a prefix.
 - `/list` or `会话列表`
 - `/current` or `当前会话`
 - `/switch 2` or `切换会话 2`
+- `/delete 2` or `删除会话 2`
+- `/clear` or `清空会话`
 
 ### Common environment variables
 
 - `BOT_TOKEN`
 - `WECHAT_BASE_URL`
+- `WECHAT_CDN_BASE_URL`
 - `WECHAT_AGENT_PROVIDER`
 - `OPENCODE_MODEL`
 - `OPENCODE_TURN_TIMEOUT_MS`
@@ -230,9 +259,14 @@ If you already chose a default provider, you do not need to add a prefix.
 
 - `Codex` and `OpenCode` run through local CLIs
 - `Claude Code` uses a separate MCP plugin flow
-- `OpenCode` returns the final answer by default in WeChat; set `OPENCODE_THINKING=1` if you want thinking enabled
+- The project can save inbound WeChat images, files, voice, and video locally before handing them to the agent
 - WeChat credentials are stored in your user directory by default
-- It is best to keep only one running instance at a time
+
+### Acknowledgement
+
+Some of the attachment and integration ideas were inspired by:
+
+- https://github.com/chenhg5/cc-connect
 
 [Back to top](#top)
 

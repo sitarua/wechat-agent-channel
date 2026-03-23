@@ -7,7 +7,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .constants import BOT_TYPE, DEFAULT_BASE_URL, LOGIN_TIMEOUT_MS, PROJECT_DIR, STATUS_TIMEOUT_MS
+from .constants import (
+    BOT_TYPE,
+    DEFAULT_BASE_URL,
+    DEFAULT_CDN_BASE_URL,
+    LOGIN_TIMEOUT_MS,
+    PROJECT_DIR,
+    STATUS_TIMEOUT_MS,
+)
 from .state import (
     get_app_config_file,
     get_credentials_file,
@@ -139,6 +146,7 @@ def main(*, reset_provider=False, select_provider=True):
             account = {
                 "token": status["bot_token"],
                 "baseUrl": status.get("baseurl") or DEFAULT_BASE_URL,
+                "cdnBaseUrl": DEFAULT_CDN_BASE_URL,
                 "accountId": status["ilink_bot_id"],
                 "userId": status.get("ilink_user_id"),
                 "savedAt": now_utc_iso(),

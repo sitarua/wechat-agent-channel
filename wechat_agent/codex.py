@@ -113,25 +113,41 @@ class CodexRunner:
         except ValueError:
             return DEFAULT_CODEX_TIMEOUT_MS
 
+    @staticmethod
+    def _wrap_powershell_script(script_path):
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        if shell and Path(script_path).exists():
+            return [shell, "-NoProfile", "-File", str(script_path)]
+        return None
+
     def _resolve_command(self):
         override = os.environ.get("CODEX_BIN", "").strip()
         if override:
-            return override
+            if os.name == "nt" and override.lower().endswith(".ps1"):
+                wrapped = self._wrap_powershell_script(override)
+                if wrapped:
+                    return wrapped
+            return [override]
 
-        candidates = ["codex"]
         if os.name == "nt":
+            appdata = os.environ.get("APPDATA", "").strip()
+            if appdata:
+                wrapped = self._wrap_powershell_script(Path(appdata) / "npm" / "codex.ps1")
+                if wrapped:
+                    return wrapped
             candidates = ["codex.cmd", "codex.exe", "codex"]
+        else:
+            candidates = ["codex"]
 
         for candidate in candidates:
             resolved = shutil.which(candidate)
             if resolved:
-                return resolved
+                return [resolved]
 
-        return "codex"
+        return ["codex"]
 
     def _base_args(self):
-        args = [
-            self._resolve_command(),
+        args = self._resolve_command() + [
             "-C",
             str(Path.cwd()),
             "-a",
@@ -143,27 +159,12 @@ class CodexRunner:
             args.extend(["-m", self.model])
         return args
 
-    @staticmethod
-    def _build_prompt(user_message, fresh_session):
-        if not fresh_session:
-            return user_message
-        return "\n".join(
-            [
-                "你通过微信与用户交流。",
-                "默认用中文回复，除非用户明确使用其他语言。",
-                "回复尽量直接、简洁、可执行。",
-                "微信不渲染 Markdown，尽量输出纯文本。",
-                "",
-                f"用户消息：{user_message}",
-            ]
-        )
-
     def _run_once(self, user_id, user_message, existing_thread_id=None):
-        fresh_session = not existing_thread_id
         args = self._base_args() + ["exec"]
         if existing_thread_id:
             args.extend(["resume", existing_thread_id])
-        args.extend(["--skip-git-repo-check", "--json", self._build_prompt(user_message, fresh_session)])
+        args.append("--skip-git-repo-check")
+        args.extend(["--json", user_message])
         log(
             "[codex] 启动命令: "
             + json.dumps(
@@ -297,3 +298,17 @@ class CodexRunner:
             if session:
                 self.session_store.save()
             return session
+
+    def delete_session(self, user_id, target):
+        with self._lock:
+            session = self.session_store.delete_session(user_id, target)
+            if session:
+                self.session_store.save()
+            return session
+
+    def clear_sessions(self, user_id):
+        with self._lock:
+            count = self.session_store.clear_sessions(user_id)
+            if count:
+                self.session_store.save()
+            return count

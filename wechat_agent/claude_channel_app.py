@@ -1,8 +1,14 @@
 from .constants import BACKOFF_DELAY_MS, MAX_CONSECUTIVE_FAILURES, RETRY_DELAY_MS
+import threading
+import time
+
+from .media import build_prompt, parse_inbound_message
 from .mcp import McpBridge
 from .state import SYNC_BUF_FILE, get_credentials_file, load_account
 from .util import log, sleep_ms
-from .wechat import WechatClient, extract_text
+from .wechat import WechatClient
+
+ATTACHMENT_COALESCE_WINDOW_MS = 1800
 
 
 def _log_startup_state():
@@ -17,6 +23,17 @@ def _log_startup_state():
         log(f"使用本地微信登录凭据{suffix}")
 
 
+def _store_pending_attachment(pending, sender_id, inbound):
+    pending[sender_id] = {
+        "inbound": inbound,
+        "created_at": time.monotonic(),
+    }
+
+
+def _pop_pending_attachment(pending, sender_id):
+    return pending.pop(sender_id, None)
+
+
 def main():
     _log_startup_state()
 
@@ -25,8 +42,32 @@ def main():
 
     wechat_client = WechatClient()
     context_token_cache = {}
+    pending_attachments = {}
     mcp_bridge = McpBridge(wechat_client, context_token_cache)
     mcp_bridge.start()
+
+    def arm_pending_attachment_flush(sender_id):
+        entry = pending_attachments.get(sender_id)
+        if not entry:
+            return
+        created_at = entry["created_at"]
+
+        def flush_when_due():
+            time.sleep(ATTACHMENT_COALESCE_WINDOW_MS / 1000)
+            pending = pending_attachments.get(sender_id)
+            if not pending or pending["created_at"] != created_at:
+                return
+            pending = pending_attachments.pop(sender_id, None)
+            if not pending:
+                return
+            log(f"[claude] 纯附件消息等待补充文字超时，开始直接处理 {sender_id.split('@')[0]}")
+            mcp_bridge.notify_claude_channel(pending["inbound"].prompt, sender_id)
+
+        threading.Thread(
+            target=flush_when_due,
+            name="claude-attachment-coalesce",
+            daemon=True,
+        ).start()
 
     get_updates_buf = ""
     consecutive_failures = 0
@@ -74,8 +115,8 @@ def main():
                 if msg.get("message_type") != 1:
                     continue
 
-                text = extract_text(msg)
-                if not text:
+                inbound = parse_inbound_message(wechat_client, msg)
+                if not inbound.text and not inbound.has_media:
                     continue
 
                 sender_id = msg.get("from_user_id") or "unknown"
@@ -85,8 +126,30 @@ def main():
                 else:
                     log(f"收到消息但缺少 context_token: from={sender_id.split('@')[0]}，后续可能无法自动回复")
 
-                log(f"收到消息: from={sender_id.split('@')[0]} text={text[:60]}")
-                mcp_bridge.notify_claude_channel(text, sender_id)
+                preview = inbound.text[:60] if inbound.text else "[附件消息]"
+                log(
+                    f"收到消息: from={sender_id.split('@')[0]} text={preview}"
+                    + (f" images={len(inbound.images)} files={len(inbound.files)}" if inbound.has_media else "")
+                )
+                if inbound.has_media and not inbound.text:
+                    _store_pending_attachment(pending_attachments, sender_id, inbound)
+                    arm_pending_attachment_flush(sender_id)
+                    log(f"[claude] 已缓存来自 {sender_id.split('@')[0]} 的纯附件消息，等待补充文字后合并处理")
+                    continue
+
+                if inbound.text and not inbound.has_media:
+                    pending = _pop_pending_attachment(pending_attachments, sender_id)
+                    if pending:
+                        pending_inbound = pending["inbound"]
+                        inbound.images = pending_inbound.images
+                        inbound.files = pending_inbound.files
+                        inbound.prompt = build_prompt(
+                            inbound.text,
+                            images=inbound.images,
+                            files=inbound.files,
+                        )
+
+                mcp_bridge.notify_claude_channel(inbound.prompt, sender_id)
 
         except KeyboardInterrupt:
             raise

@@ -3,3 +3,6 @@ sessions/*.json
 __pycache__/
 logs/
 .claude/
+.wechat-agent/
+package/
+*.tgz

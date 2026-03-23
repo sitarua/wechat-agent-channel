@@ -63,6 +63,36 @@ class MultiSessionStore:
         entry["engineId"] = None
         entry["updatedAt"] = now_utc_iso()
 
+    def delete_session(self, user_id, target):
+        user = self.data.get(user_id)
+        if not isinstance(user, dict):
+            return None
+
+        selected = self._select_session(user, target)
+        if not selected:
+            return None
+
+        removed = self._with_meta(selected["key"], selected["current"], user["sessions"][selected["key"]])
+        del user["sessions"][selected["key"]]
+
+        if not user["sessions"]:
+            self.data.pop(user_id, None)
+            return removed
+
+        if user.get("current") == selected["key"]:
+            next_session = self._ordered_sessions(user)[0]
+            user["current"] = next_session["key"]
+
+        return removed
+
+    def clear_sessions(self, user_id):
+        user = self.data.get(user_id)
+        if not isinstance(user, dict):
+            return 0
+        count = len(user.get("sessions") or {})
+        self.data.pop(user_id, None)
+        return count
+
     def create_session(self, user_id, name=None):
         user = self.data.get(user_id)
         if not isinstance(user, dict):
@@ -86,24 +116,7 @@ class MultiSessionStore:
         if not isinstance(user, dict):
             return None
 
-        target_text = str(target or "").strip()
-        if not target_text:
-            return None
-
-        ordered = self._ordered_sessions(user)
-        selected = None
-
-        if target_text.isdigit():
-            index = int(target_text) - 1
-            if 0 <= index < len(ordered):
-                selected = ordered[index]
-        else:
-            lowered = target_text.casefold()
-            for entry in ordered:
-                if entry["key"].casefold() == lowered or str(entry.get("name") or "").casefold() == lowered:
-                    selected = entry
-                    break
-
+        selected = self._select_session(user, target)
         if not selected:
             return None
 
@@ -148,6 +161,24 @@ class MultiSessionStore:
             return (0 if entry["current"] else 1, -self._time_rank(entry.get("updatedAt")), entry["name"])
 
         return sorted(items, key=sort_key)
+
+    def _select_session(self, user, target):
+        target_text = str(target or "").strip()
+        if not target_text:
+            return None
+
+        ordered = self._ordered_sessions(user)
+        if target_text.isdigit():
+            index = int(target_text) - 1
+            if 0 <= index < len(ordered):
+                return ordered[index]
+            return None
+
+        lowered = target_text.casefold()
+        for entry in ordered:
+            if entry["key"].casefold() == lowered or str(entry.get("name") or "").casefold() == lowered:
+                return entry
+        return None
 
     @staticmethod
     def _time_rank(value):
