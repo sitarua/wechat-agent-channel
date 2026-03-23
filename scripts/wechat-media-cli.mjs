@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const CHANNEL_VERSION = "wechat-agent-channel/1.1.0";
+const CHANNEL_VERSION = "wechat-agent-channel/1.2.1";
 
 const MESSAGE_ITEM_TYPE = {
   TEXT: 1,

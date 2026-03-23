@@ -127,6 +127,7 @@ claude --dangerously-load-development-channels server:wechat
 - `Codex` 和 `OpenCode` 走本地 CLI
 - `Claude Code` 走独立 MCP 插件模式
 - 当前项目支持把微信图片、文件、语音、视频保存到本地并交给 agent 使用
+- `Codex` / `OpenCode` 如需回传本地文件，可在最终回复末尾输出 `wechat-reply` JSON 代码块，桥会按其中的 `media_paths` 回传到微信
 - 微信登录凭据默认保存在用户目录下
 
 ### 致谢
@@ -260,6 +261,7 @@ If you already chose a default provider, you do not need to add a prefix.
 - `Codex` and `OpenCode` run through local CLIs
 - `Claude Code` uses a separate MCP plugin flow
 - The project can save inbound WeChat images, files, voice, and video locally before handing them to the agent
+- `Codex` / `OpenCode` can return local files to WeChat by appending a `wechat-reply` JSON code block with `media_paths` at the end of the final reply
 - WeChat credentials are stored in your user directory by default
 
 ### Acknowledgement

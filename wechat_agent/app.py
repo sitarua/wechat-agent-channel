@@ -4,6 +4,7 @@ import signal
 import threading
 import sys
 import time
+from pathlib import Path
 from uuid import uuid4
 
 from .codex import CodexRunner
@@ -11,6 +12,7 @@ from .opencode import OpenCodeRunner
 from .constants import BACKOFF_DELAY_MS, MAX_CONSECUTIVE_FAILURES, RETRY_DELAY_MS
 from .lock import SingleInstanceLock
 from .media import parse_inbound_message
+from .reply_protocol import parse_agent_reply
 from .state import (
     CODEX_THREAD_STORE_FILE,
     INSTANCE_LOCK_FILE,
@@ -37,6 +39,7 @@ SESSION_COMMAND_ALIASES = {
 
 MESSAGE_BINDING_TTL_SECONDS = 60 * 30
 MESSAGE_BINDING_MAX_ITEMS = 2000
+SESSION_ATTACHMENT_MAX_ITEMS = 50
 
 
 def _safe_int_text(value):
@@ -120,6 +123,82 @@ def _upsert_message_binding(store, msg_key, provider, sender_id, context_token, 
         ordered = sorted(store.items(), key=lambda item: float(item[1].get("updated_at") or 0))
         for key, _ in ordered[: len(store) - MESSAGE_BINDING_MAX_ITEMS]:
             store.pop(key, None)
+
+
+def _session_attachment_store_key(provider, sender_id, session_binding):
+    session_key = (session_binding or {}).get("session_key", "-")
+    return f"{provider}|{sender_id}|{session_key}"
+
+
+def _update_session_attachments(store, store_key, inbound):
+    record = store.setdefault(
+        store_key,
+        {
+            "images": [],
+            "files": [],
+            "updated_at": 0.0,
+        },
+    )
+
+    for item in inbound.images:
+        if not item.path:
+            continue
+        alias = f"@image{len(record['images']) + 1}"
+        record["images"].append({"alias": alias, "path": item.path, "name": item.file_name or Path(item.path).name})
+
+    for item in inbound.files:
+        if not item.path:
+            continue
+        alias = f"@file{len(record['files']) + 1}"
+        record["files"].append({"alias": alias, "path": item.path, "name": item.file_name or Path(item.path).name})
+
+    if len(record["images"]) > SESSION_ATTACHMENT_MAX_ITEMS:
+        record["images"] = record["images"][-SESSION_ATTACHMENT_MAX_ITEMS:]
+    if len(record["files"]) > SESSION_ATTACHMENT_MAX_ITEMS:
+        record["files"] = record["files"][-SESSION_ATTACHMENT_MAX_ITEMS:]
+
+    record["updated_at"] = time.time()
+    return record
+
+
+def _session_attachment_alias_map(record):
+    aliases = {}
+    data = record if isinstance(record, dict) else {}
+    for key in ("images", "files"):
+        for item in data.get(key) or []:
+            alias = str(item.get("alias") or "").strip()
+            path = str(item.get("path") or "").strip()
+            if alias and path:
+                aliases[alias] = path
+    return aliases
+
+
+def _format_session_attachment_refs(record):
+    data = record if isinstance(record, dict) else {}
+    lines = []
+    images = data.get("images") or []
+    files = data.get("files") or []
+
+    if images:
+        lines.append("当前会话可引用的图片附件：")
+        for item in images[-10:]:
+            lines.append(f"- {item['alias']} {item['name']}: {item['path']}")
+
+    if files:
+        lines.append("当前会话可引用的文件附件：")
+        for item in files[-10:]:
+            lines.append(f"- {item['alias']} {item['name']}: {item['path']}")
+
+    if not lines:
+        return ""
+
+    lines.extend(
+        [
+            "如果要回传历史附件，优先使用这些会话别名，例如 @image2 或 @file3。",
+            "会话别名比手写路径更可靠。",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _parse_session_command(text):
@@ -224,9 +303,11 @@ def main():
     task_queue = queue.Queue()
     message_bindings = {}
     message_bindings_lock = threading.Lock()
+    session_attachments = {}
+    session_attachments_lock = threading.Lock()
     _create_worker(task_queue)
 
-    def record_message_binding(msg_key, provider, sender_id, context_token, has_media, session_binding):
+    def record_message_binding(msg_key, provider, sender_id, context_token, has_media, session_binding, media_aliases=None):
         with message_bindings_lock:
             _upsert_message_binding(
                 message_bindings,
@@ -237,8 +318,35 @@ def main():
                 has_media,
                 session_binding,
             )
+            if media_aliases:
+                message_bindings[msg_key]["media_aliases"] = dict(media_aliases)
 
-    def send_provider_result(provider, sender_id, result, context_token=None, msg_key=None):
+    def update_session_attachment_index(provider, sender_id, session_binding, inbound):
+        if not inbound or not inbound.has_media:
+            with session_attachments_lock:
+                return dict(
+                    _session_attachment_alias_map(
+                        session_attachments.get(_session_attachment_store_key(provider, sender_id, session_binding), {})
+                    )
+                )
+
+        store_key = _session_attachment_store_key(provider, sender_id, session_binding)
+        with session_attachments_lock:
+            record = _update_session_attachments(session_attachments, store_key, inbound)
+            return dict(_session_attachment_alias_map(record))
+
+    def build_session_attachment_prompt(provider, sender_id, session_binding):
+        store_key = _session_attachment_store_key(provider, sender_id, session_binding)
+        with session_attachments_lock:
+            record = session_attachments.get(store_key)
+            return _format_session_attachment_refs(record)
+
+    def get_session_attachment_aliases(provider, sender_id, session_binding):
+        store_key = _session_attachment_store_key(provider, sender_id, session_binding)
+        with session_attachments_lock:
+            return dict(_session_attachment_alias_map(session_attachments.get(store_key)))
+
+    def send_provider_result(provider, sender_id, result, context_token=None, msg_key=None, media_aliases=None):
         sender = sender_id.split("@")[0]
         ctx = context_token
         if not ctx:
@@ -246,16 +354,71 @@ def main():
             log(f"[{provider}] 已拿到结果，但无法回复 {sender}：缺少 context_token{msg_tag}")
             return
 
-        response = wechat_client.send_message(sender_id, ctx, result[:1000])
-        message_id = None
-        if isinstance(response, dict):
-            message_id = response.get("message_id") or response.get("msg_id")
-
         msg_tag = f" msg_key={msg_key}" if msg_key else ""
-        if message_id:
-            log(f"[{provider}] 已回复 {sender}，message_id={message_id}{msg_tag}")
+        try:
+            parsed = parse_agent_reply(result)
+        except Exception as err:
+            log(f"[{provider}] 解析回传协议失败，按纯文本回复: {err}{msg_tag}")
+            parsed = None
+
+        if not parsed:
+            parsed_text = str(result or "").strip()
+            parsed_media_paths = []
         else:
-            log(f"[{provider}] 已回复 {sender}，sendMessage 返回: {response}{msg_tag}")
+            parsed_text = parsed.text
+            parsed_media_paths = list(parsed.media_paths or [])
+
+        normalized_paths = []
+        media_errors = []
+        alias_map = {str(key): str(value) for key, value in (media_aliases or {}).items()}
+        for media_path in parsed_media_paths:
+            raw_path = str(media_path or "").strip()
+            if not raw_path:
+                continue
+            candidate_path = alias_map.get(raw_path, raw_path)
+            expanded = Path(raw_path).expanduser()
+            if candidate_path != raw_path:
+                expanded = Path(candidate_path).expanduser()
+            resolved = expanded if expanded.is_absolute() else (Path.cwd() / expanded)
+            if not resolved.exists():
+                media_errors.append(f"文件不存在：{raw_path}")
+                continue
+            if not resolved.is_file():
+                media_errors.append(f"不是文件：{raw_path}")
+                continue
+            normalized_paths.append(candidate_path)
+
+        sent_any = False
+        if normalized_paths:
+            for index, media_path in enumerate(normalized_paths):
+                text_payload = parsed_text[:1000] if index == 0 else ""
+                wechat_client.send_media_message(sender_id, ctx, text_payload, media_path)
+                sent_any = True
+            log(
+                f"[{provider}] 已回复 {sender}，media_count={len(normalized_paths)}"
+                + (f" text=yes{msg_tag}" if parsed_text else f" text=no{msg_tag}")
+            )
+        elif parsed_text:
+            response = wechat_client.send_message(sender_id, ctx, parsed_text[:1000])
+            sent_any = True
+            message_id = None
+            if isinstance(response, dict):
+                message_id = response.get("message_id") or response.get("msg_id")
+            if message_id:
+                log(f"[{provider}] 已回复 {sender}，message_id={message_id}{msg_tag}")
+            else:
+                log(f"[{provider}] 已回复 {sender}，sendMessage 返回: {response}{msg_tag}")
+
+        if media_errors:
+            error_text = "\n".join(["以下文件回传失败：", *media_errors])[:1000]
+            response = wechat_client.send_message(sender_id, ctx, error_text)
+            sent_any = True
+            log(f"[{provider}] 文件回传失败，已通知 {sender}：{'; '.join(media_errors)}{msg_tag}")
+
+        if not sent_any:
+            fallback = "处理完成，但没有可发送的文本或文件。"
+            response = wechat_client.send_message(sender_id, ctx, fallback)
+            log(f"[{provider}] 结果为空，已发送兜底提示给 {sender}: {response}{msg_tag}")
 
     def enqueue_provider_task(provider, sender_id, inbound, context_token, msg_key, session_binding):
         if provider == "codex":
@@ -267,12 +430,16 @@ def main():
                 msg_key=msg_key,
                 session_binding=session_binding,
             ):
+                media_aliases = get_session_attachment_aliases("codex", sender_id, session_binding)
                 log(
                     f"[codex] 开始处理 from={sender_id.split('@')[0]} msg_key={msg_key} "
                     + _format_session_binding(session_binding)
                 )
                 log("[codex] 已转交 Codex，会在拿到结果后自动回复微信")
                 prompt = inbound.prompt
+                session_refs = build_session_attachment_prompt("codex", sender_id, session_binding)
+                if session_refs:
+                    prompt = f"{prompt}\n\n{session_refs}" if prompt else session_refs
                 _log_prompt_dispatch("codex", sender_id, prompt)
                 result = codex_runner.run(sender_id, prompt)
                 final_binding = _provider_session_binding("codex", sender_id, codex_runner, opencode_runner)
@@ -283,12 +450,20 @@ def main():
                     context_token,
                     inbound.has_media,
                     final_binding,
+                    media_aliases=media_aliases,
                 )
                 log(
                     f"[codex] 已收到结果，准备回复 {sender_id.split('@')[0]} msg_key={msg_key} "
                     + _format_session_binding(final_binding)
                 )
-                send_provider_result("codex", sender_id, result, context_token=context_token, msg_key=msg_key)
+                send_provider_result(
+                    "codex",
+                    sender_id,
+                    result,
+                    context_token=context_token,
+                    msg_key=msg_key,
+                    media_aliases=media_aliases,
+                )
 
             task_queue.put(codex_task)
             return
@@ -302,6 +477,7 @@ def main():
                 msg_key=msg_key,
                 session_binding=session_binding,
             ):
+                media_aliases = get_session_attachment_aliases("opencode", sender_id, session_binding)
                 log(
                     f"[opencode] 开始处理 from={sender_id.split('@')[0]} msg_key={msg_key} "
                     + _format_session_binding(session_binding)
@@ -326,6 +502,9 @@ def main():
                     daemon=True,
                 ).start()
                 prompt = inbound.prompt
+                session_refs = build_session_attachment_prompt("opencode", sender_id, session_binding)
+                if session_refs:
+                    prompt = f"{prompt}\n\n{session_refs}" if prompt else session_refs
                 _log_prompt_dispatch("opencode", sender_id, prompt)
                 result = opencode_runner.run(sender_id, prompt)
                 waiting_notice_done.set()
@@ -337,12 +516,20 @@ def main():
                     context_token,
                     inbound.has_media,
                     final_binding,
+                    media_aliases=media_aliases,
                 )
                 log(
                     f"[opencode] 已收到结果，准备回复 {sender_id.split('@')[0]} msg_key={msg_key} "
                     + _format_session_binding(final_binding)
                 )
-                send_provider_result("opencode", sender_id, result, context_token=context_token, msg_key=msg_key)
+                send_provider_result(
+                    "opencode",
+                    sender_id,
+                    result,
+                    context_token=context_token,
+                    msg_key=msg_key,
+                    media_aliases=media_aliases,
+                )
 
             task_queue.put(opencode_task)
 
@@ -477,6 +664,7 @@ def main():
                 context_token = msg.get("context_token")
                 msg_key = _build_msg_key(msg, sender_id, context_token)
                 session_binding = _provider_session_binding(default_provider, sender_id, codex_runner, opencode_runner)
+                session_media_aliases = update_session_attachment_index(default_provider, sender_id, session_binding, inbound)
                 record_message_binding(
                     msg_key,
                     default_provider,
@@ -484,6 +672,7 @@ def main():
                     context_token,
                     inbound.has_media,
                     session_binding,
+                    media_aliases=session_media_aliases,
                 )
                 if not context_token:
                     log(

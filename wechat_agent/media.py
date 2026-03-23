@@ -64,12 +64,30 @@ def build_prompt(text, images=None, files=None):
         refs.append(_format_refs("本地文件", files))
         refs.append("请直接读取上面的本地文件后再回答。")
 
+    body = ""
     if prompt and refs:
-        return f"{prompt}\n\n" + "\n".join(refs)
-    if refs:
-        return "\n".join(refs)
+        body = f"{prompt}\n\n" + "\n".join(refs)
+    elif refs:
+        body = "\n".join(refs)
+    else:
+        body = prompt.strip()
 
-    return prompt.strip()
+    protocol = "\n\n".join(
+        [
+            "如果你需要把本机上的图片、视频或文件回传到微信，请在最终回复末尾追加一个唯一的 JSON 代码块。",
+            "不要在解释性文字里提路径，只在这个代码块里提供路径。",
+            "如果下文给出了会话附件别名，优先使用这些别名，例如 @image1、@file1，避免手写长路径出错。",
+            "代码块格式如下：",
+            "```wechat-reply",
+            '{"text":"发给用户的文本，可留空","media_paths":["@image1","绝对路径或相对当前项目的路径"]}',
+            "```",
+            "如果不需要回传文件，就不要输出这个代码块。",
+        ]
+    )
+
+    if body:
+        return f"{body}\n\n{protocol}"
+    return protocol
 
 
 def parse_inbound_message(wechat_client, msg):
