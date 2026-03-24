@@ -132,6 +132,32 @@ claude --dangerously-load-development-channels server:wechat
 - `OPENCODE_THINKING`
 - `OPENCODE_BIN`
 
+### 发布版本
+
+1. 准备版本号：
+
+```bash
+npm run release:check -- 1.2.2
+npm run release:prepare -- 1.2.2
+```
+
+2. 检查改动并提交：
+
+```bash
+git diff
+git commit -am "release: v1.2.2"
+```
+
+3. 打 tag 并推送到 GitHub / Gitee：
+
+```bash
+git tag v1.2.2
+git push origin main --tags
+git push gitee main --tags
+```
+
+详细说明见 [`docs/release.md`](docs/release.md)。
+
 ### 说明
 
 - `Codex` 和 `OpenCode` 走本地 CLI
@@ -276,6 +302,32 @@ If you already chose a default provider, you do not need to add a prefix.
 - `OPENCODE_TURN_TIMEOUT_MS`
 - `OPENCODE_THINKING`
 - `OPENCODE_BIN`
+
+### Releases
+
+1. Prepare the version:
+
+```bash
+npm run release:check -- 1.2.2
+npm run release:prepare -- 1.2.2
+```
+
+2. Review and commit:
+
+```bash
+git diff
+git commit -am "release: v1.2.2"
+```
+
+3. Tag and push to GitHub / Gitee:
+
+```bash
+git tag v1.2.2
+git push origin main --tags
+git push gitee main --tags
+```
+
+See [`docs/release.md`](docs/release.md) for the full flow.
 
 ### Notes
 

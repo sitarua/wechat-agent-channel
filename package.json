@@ -5,6 +5,8 @@
     "start": "node scripts/run-python.js server.py",
     "setup": "node scripts/run-python.js setup.py",
     "setup:reset": "node scripts/run-python.js setup.py --reset-provider",
+    "release:check": "node scripts/run-python.js scripts/release.py --dry-run",
+    "release:prepare": "node scripts/run-python.js scripts/release.py",
     "claude:setup": "node scripts/claude-channel-cli.mjs setup",
     "claude:install": "node scripts/claude-channel-cli.mjs install"
   },

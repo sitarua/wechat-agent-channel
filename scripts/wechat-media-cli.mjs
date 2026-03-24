@@ -1,10 +1,26 @@
 #!/usr/bin/env node
 
 import crypto from "node:crypto";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const CHANNEL_VERSION = "wechat-agent-channel/1.2.1";
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
+
+function loadChannelVersion() {
+  try {
+    const raw = fsSync.readFileSync(path.join(REPO_ROOT, "version.json"), "utf-8");
+    const parsed = JSON.parse(raw);
+    const version = String(parsed?.version || "").trim();
+    return version || "1.2.1";
+  } catch {
+    return "1.2.1";
+  }
+}
+
+const CHANNEL_VERSION = `wechat-agent-channel/${loadChannelVersion()}`;
 
 const MESSAGE_ITEM_TYPE = {
   TEXT: 1,

@@ -1,8 +1,23 @@
+import json
 from pathlib import Path
 
 
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_channel_version():
+    version_file = PROJECT_DIR / "version.json"
+    try:
+        parsed = json.loads(version_file.read_text(encoding="utf-8"))
+    except Exception:
+        return "1.2.1"
+
+    version = str((parsed or {}).get("version") or "").strip()
+    return version or "1.2.1"
+
+
 CHANNEL_NAME = "wechat"
-CHANNEL_VERSION = "1.2.1"
+CHANNEL_VERSION = _load_channel_version()
 DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
 DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 SUPPORTED_PROVIDERS = {"claude", "codex", "opencode"}
@@ -27,5 +42,3 @@ MCP_SUPPORTED_PROTOCOL_VERSIONS = {
     "2024-11-05",
     "2024-10-07",
 }
-
-PROJECT_DIR = Path(__file__).resolve().parent.parent
