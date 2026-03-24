@@ -150,10 +150,7 @@ class CodexRunner:
         args = self._resolve_command() + [
             "-C",
             str(Path.cwd()),
-            "-a",
-            "never",
-            "-s",
-            "danger-full-access",
+            "--dangerously-bypass-approvals-and-sandbox",
         ]
         if self.model:
             args.extend(["-m", self.model])

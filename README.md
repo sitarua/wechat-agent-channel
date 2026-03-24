@@ -117,6 +117,9 @@ claude --dangerously-load-development-channels server:wechat
 - `WECHAT_BASE_URL`
 - `WECHAT_CDN_BASE_URL`
 - `WECHAT_AGENT_PROVIDER`
+- `CODEX_MODEL`
+- `CODEX_TURN_TIMEOUT_MS`
+- `CODEX_BIN`
 - `OPENCODE_MODEL`
 - `OPENCODE_TURN_TIMEOUT_MS`
 - `OPENCODE_THINKING`
@@ -126,6 +129,7 @@ claude --dangerously-load-development-channels server:wechat
 
 - `Codex` 和 `OpenCode` 走本地 CLI
 - `Claude Code` 走独立 MCP 插件模式
+- 当前项目调用 `Codex` 时默认使用 `--dangerously-bypass-approvals-and-sandbox`，这样本地 CLI 才能真正拿到完整执行权限；请只在你信任的本机环境里使用
 - 当前项目支持把微信图片、文件、语音、视频保存到本地并交给 agent 使用
 - `Codex` / `OpenCode` 如需回传本地文件，可在最终回复末尾输出 `wechat-reply` JSON 代码块，桥会按其中的 `media_paths` 回传到微信
 - 微信登录凭据默认保存在用户目录下
@@ -251,6 +255,9 @@ If you already chose a default provider, you do not need to add a prefix.
 - `WECHAT_BASE_URL`
 - `WECHAT_CDN_BASE_URL`
 - `WECHAT_AGENT_PROVIDER`
+- `CODEX_MODEL`
+- `CODEX_TURN_TIMEOUT_MS`
+- `CODEX_BIN`
 - `OPENCODE_MODEL`
 - `OPENCODE_TURN_TIMEOUT_MS`
 - `OPENCODE_THINKING`
@@ -260,6 +267,7 @@ If you already chose a default provider, you do not need to add a prefix.
 
 - `Codex` and `OpenCode` run through local CLIs
 - `Claude Code` uses a separate MCP plugin flow
+- This project invokes `Codex` with `--dangerously-bypass-approvals-and-sandbox` so the local CLI actually gets full execution permissions; only use it on a machine you trust
 - The project can save inbound WeChat images, files, voice, and video locally before handing them to the agent
 - `Codex` / `OpenCode` can return local files to WeChat by appending a `wechat-reply` JSON code block with `media_paths` at the end of the final reply
 - WeChat credentials are stored in your user directory by default
