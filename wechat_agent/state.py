@@ -15,6 +15,7 @@ INSTANCE_LOCK_FILE = STATE_DIR / "wechat-agent.lock"
 SYNC_BUF_FILE = Path.home() / ".wechat-agent-sync-buf"
 CODEX_THREAD_STORE_FILE = PROJECT_DIR / "sessions" / "codex-threads.json"
 OPENCODE_SESSION_STORE_FILE = PROJECT_DIR / "sessions" / "opencode-sessions.json"
+OPENCODE_MODEL_CONFIG_FILE = STATE_DIR / "opencode-model.json"
 
 
 def normalize_provider(raw):
@@ -112,3 +113,50 @@ def save_app_config(config):
 def route_task(default_provider="codex"):
     provider = normalize_provider(default_provider or "codex")
     return provider if provider in SUPPORTED_PROVIDERS else "codex"
+
+
+def get_opencode_model_config_file():
+    return OPENCODE_MODEL_CONFIG_FILE
+
+
+def load_opencode_model_config():
+    """加载 opencode 模型配置（按用户存储）。"""
+    env_model = os.environ.get("OPENCODE_MODEL", "").strip()
+    if env_model:
+        return {"model": env_model, "source": "env"}
+
+    parsed = load_json(OPENCODE_MODEL_CONFIG_FILE)
+    if not isinstance(parsed, dict):
+        return None
+
+    model = str(parsed.get("model") or "").strip()
+    if not model:
+        return None
+
+    return {
+        "model": model,
+        "savedAt": parsed.get("savedAt"),
+        "source": "file",
+    }
+
+
+def save_opencode_model_config(model=None):
+    """保存 opencode 模型配置（按用户存储）。"""
+    if not model:
+        # 清除配置
+        if OPENCODE_MODEL_CONFIG_FILE.exists():
+            OPENCODE_MODEL_CONFIG_FILE.unlink()
+        return
+
+    ensure_parent(OPENCODE_MODEL_CONFIG_FILE)
+    OPENCODE_MODEL_CONFIG_FILE.write_text(
+        json.dumps(
+            {
+                "model": model,
+                "savedAt": now_utc_iso(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )

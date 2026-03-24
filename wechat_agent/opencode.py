@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .constants import DEFAULT_OPENCODE_TIMEOUT_MS
 from .session_store import MultiSessionStore
+from .state import load_opencode_model_config
 from .util import ensure_parent
 
 
@@ -18,9 +19,72 @@ class OpenCodeRunner:
         ensure_parent(self.store_file)
         self._lock = threading.Lock()
         self.timeout_ms = self._get_timeout_ms()
-        self.model = os.environ.get("OPENCODE_MODEL", "").strip()
+        self._model = None
         self.enable_thinking = os.environ.get("OPENCODE_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
         self.session_store = MultiSessionStore(self.store_file)
+
+    @property
+    def model(self):
+        """动态获取模型 - 优先检查配置文件，其次回退到环境变量。"""
+        if self._model is not None:
+            return self._model
+        config = load_opencode_model_config()
+        if config and config.get("model"):
+            return config["model"]
+        return os.environ.get("OPENCODE_MODEL", "").strip()
+
+    def set_model(self, model):
+        self._model = model if model else None
+
+    def clear_model(self):
+        self._model = None
+
+    def get_available_models(self):
+        """从 opencode CLI 获取可用模型列表。"""
+        try:
+            result = subprocess.run(
+                [self._resolve_command()[0], "models"],
+                cwd=Path.cwd(),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                models = []
+                for line in result.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if line and not line.startswith("="):
+                        models.append(line)
+                return models
+        except Exception:
+            pass
+        return []
+
+    def match_model(self, query):
+        """通过精确匹配、前缀匹配或模糊搜索来匹配模型。"""
+        if not query:
+            return None
+
+        query = query.strip()
+        models = self.get_available_models()
+        if not models:
+            return None
+
+        query_lower = query.lower()
+
+        for m in models:
+            if m.lower() == query_lower:
+                return m
+
+        for m in models:
+            if m.lower().startswith(query_lower):
+                return m
+
+        for m in models:
+            if query_lower in m.lower():
+                return m
+
+        return None
 
     def _get_timeout_ms(self):
         raw = os.environ.get("OPENCODE_TURN_TIMEOUT_MS", "").strip()

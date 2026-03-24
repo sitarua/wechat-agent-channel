@@ -35,6 +35,12 @@ SESSION_COMMAND_ALIASES = {
     "clear": ["/clear", "/清空", "/清空会话", "清空会话", "清空历史会话"],
 }
 
+MODEL_COMMAND_ALIASES = {
+    "list": ["/models", "/模型列表", "模型列表", "查看模型", "/查看模型"],
+    "set": ["/model", "/模型", "设置模型", "切换模型"],
+    "clear": ["/model clear", "/模型清除", "清除模型"],
+}
+
 MESSAGE_BINDING_TTL_SECONDS = 60 * 30
 MESSAGE_BINDING_MAX_ITEMS = 2000
 
@@ -128,6 +134,35 @@ def _parse_session_command(text):
         return None
 
     for action, aliases in SESSION_COMMAND_ALIASES.items():
+        for alias in aliases:
+            if stripped == alias:
+                return {"action": action, "arg": ""}
+            for separator in (" ", ":", "："):
+                prefix = f"{alias}{separator}"
+                if stripped.startswith(prefix):
+                    return {"action": action, "arg": stripped[len(prefix):].strip()}
+    return None
+
+
+def _parse_model_command(text):
+    """解析模型相关命令。"""
+    stripped = str(text or "").strip()
+    if not stripped:
+        return None
+
+    # 先检查 clear 命令
+    for alias in MODEL_COMMAND_ALIASES.get("clear", []):
+        if stripped == alias:
+            return {"action": "clear", "arg": ""}
+        for separator in (" ", ":", "："):
+            prefix = f"{alias}{separator}"
+            if stripped.startswith(prefix):
+                return None  # clear 命令不允许带参数
+
+    # 检查其他命令
+    for action, aliases in MODEL_COMMAND_ALIASES.items():
+        if action == "clear":
+            continue
         for alias in aliases:
             if stripped == alias:
                 return {"action": action, "arg": ""}
@@ -422,6 +457,50 @@ def main():
         send_provider_result("session", sender_id, reply, context_token=context_token, msg_key=msg_key)
         return True
 
+    def handle_model_command(sender_id, text, context_token, msg_key, runner):
+        """处理 opencode 的模型相关命令。"""
+        from .state import save_opencode_model_config
+
+        parsed = _parse_model_command(text)
+        if not parsed:
+            return False
+
+        action = parsed["action"]
+        arg = parsed["arg"]
+
+        if action == "list":
+            models = runner.get_available_models()
+            if not models:
+                reply = "无法获取模型列表，请确保 opencode CLI 已正确安装。"
+            else:
+                current = runner.model
+                lines = ["可用模型："]
+                for model in models:
+                    marker = " [当前]" if model == current else ""
+                    lines.append(f"• {model}{marker}")
+                reply = "\n".join(lines)
+        elif action == "set":
+            if not arg:
+                current = runner.model or "(未设置)"
+                reply = f"当前模型：{current}\n用法：/model <模型名称或简写>\n例如：/model m2.5"
+            else:
+                matched = runner.match_model(arg)
+                if not matched:
+                    available = runner.get_available_models()
+                    reply = f"未找到匹配 \"{arg}\" 的模型\n可用模型：\n" + "\n".join(f"• {m}" for m in available)
+                else:
+                    runner.set_model(matched)
+                    save_opencode_model_config(matched)
+                    reply = f"✅ 已切换模型：{matched}"
+        elif action == "clear":
+            runner.clear_model()
+            save_opencode_model_config(None)
+            reply = "✅ 已清除模型设置，将使用环境变量 OPENCODE_MODEL 或默认模型"
+
+        log(f"[model] opencode command handled for {sender_id.split('@')[0]}: {action} {arg}".strip())
+        send_provider_result("model", sender_id, reply, context_token=context_token, msg_key=msg_key)
+        return True
+
     get_updates_buf = ""
     consecutive_failures = 0
     if SYNC_BUF_FILE.exists():
@@ -499,6 +578,9 @@ def main():
                 )
 
                 if inbound.text and handle_session_command(sender_id, inbound.text, context_token, msg_key):
+                    continue
+
+                if inbound.text and default_provider == "opencode" and handle_model_command(sender_id, inbound.text, context_token, msg_key, opencode_runner):
                     continue
 
                 enqueue_provider_task(
