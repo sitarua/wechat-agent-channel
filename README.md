@@ -111,6 +111,13 @@ claude --dangerously-load-development-channels server:wechat
 - `/delete 2` 或 `删除会话 2`
 - `/clear` 或 `清空会话`
 
+### OpenCode 模型命令
+
+- `/models` 或 `模型列表`
+- `/model`
+- `/model m2.5`
+- `/model clear`
+
 ### 常用环境变量
 
 - `BOT_TOKEN`
@@ -248,6 +255,13 @@ If you already chose a default provider, you do not need to add a prefix.
 - `/switch 2` or `切换会话 2`
 - `/delete 2` or `删除会话 2`
 - `/clear` or `清空会话`
+
+### OpenCode Model Commands
+
+- `/models` or `模型列表`
+- `/model`
+- `/model m2.5`
+- `/model clear`
 
 ### Common environment variables
 

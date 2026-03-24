@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .constants import DEFAULT_OPENCODE_TIMEOUT_MS
 from .session_store import MultiSessionStore
+from .state import load_opencode_model_config
 from .util import ensure_parent
 
 
@@ -18,9 +19,62 @@ class OpenCodeRunner:
         ensure_parent(self.store_file)
         self._lock = threading.Lock()
         self.timeout_ms = self._get_timeout_ms()
-        self.model = os.environ.get("OPENCODE_MODEL", "").strip()
         self.enable_thinking = os.environ.get("OPENCODE_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
         self.session_store = MultiSessionStore(self.store_file)
+
+    def get_model(self, user_id=None):
+        """优先使用当前用户已保存的模型，否则回退到环境变量。"""
+        config = load_opencode_model_config(user_id)
+        if config and config.get("model"):
+            return config["model"]
+        return ""
+
+    def get_available_models(self):
+        """从 opencode CLI 获取可用模型列表。"""
+        try:
+            result = subprocess.run(
+                self._resolve_command() + ["models"],
+                cwd=Path.cwd(),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                models = []
+                for line in result.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if line and not line.startswith("="):
+                        models.append(line)
+                return models
+        except Exception:
+            pass
+        return []
+
+    def match_model(self, query):
+        """通过精确匹配、前缀匹配或模糊搜索来匹配模型。"""
+        if not query:
+            return None
+
+        query = query.strip()
+        models = self.get_available_models()
+        if not models:
+            return None
+
+        query_lower = query.lower()
+
+        for m in models:
+            if m.lower() == query_lower:
+                return m
+
+        for m in models:
+            if m.lower().startswith(query_lower):
+                return m
+
+        for m in models:
+            if query_lower in m.lower():
+                return m
+
+        return None
 
     def _get_timeout_ms(self):
         raw = os.environ.get("OPENCODE_TURN_TIMEOUT_MS", "").strip()
@@ -65,14 +119,15 @@ class OpenCodeRunner:
 
         return ["opencode"]
 
-    def _build_args(self, session_id, prompt):
+    def _build_args(self, user_id, session_id, prompt):
         args = self._resolve_command() + ["run", "--format", "json"]
         if self.enable_thinking:
             args.append("--thinking")
         if session_id:
             args.extend(["--session", session_id])
-        if self.model:
-            args.extend(["--model", self.model])
+        model = self.get_model(user_id)
+        if model:
+            args.extend(["--model", model])
         args.extend(["--dir", str(Path.cwd()), prompt])
         return args
 
@@ -126,7 +181,7 @@ class OpenCodeRunner:
 
     def _run_once(self, user_id, user_message, session_id=None):
         process = subprocess.Popen(
-            self._build_args(session_id, user_message),
+            self._build_args(user_id, session_id, user_message),
             cwd=Path.cwd(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -280,6 +335,16 @@ class OpenCodeRunner:
                 except Exception as second_error:
                     return f"❌ OpenCode 执行失败：{second_error}"
             return f"❌ OpenCode 执行失败：{first_error}"
+
+    def set_model(self, user_id, model):
+        from .state import save_opencode_model_config
+
+        save_opencode_model_config(user_id, model)
+
+    def clear_model(self, user_id):
+        from .state import save_opencode_model_config
+
+        save_opencode_model_config(user_id, None)
 
     def create_session(self, user_id, name=None):
         with self._lock:
