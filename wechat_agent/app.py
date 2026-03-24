@@ -459,8 +459,6 @@ def main():
 
     def handle_model_command(sender_id, text, context_token, msg_key, runner):
         """处理 opencode 的模型相关命令。"""
-        from .state import save_opencode_model_config
-
         parsed = _parse_model_command(text)
         if not parsed:
             return False
@@ -473,7 +471,7 @@ def main():
             if not models:
                 reply = "无法获取模型列表，请确保 opencode CLI 已正确安装。"
             else:
-                current = runner.model
+                current = runner.get_model(sender_id)
                 lines = ["可用模型："]
                 for model in models:
                     marker = " [当前]" if model == current else ""
@@ -481,7 +479,7 @@ def main():
                 reply = "\n".join(lines)
         elif action == "set":
             if not arg:
-                current = runner.model or "(未设置)"
+                current = runner.get_model(sender_id) or "(未设置)"
                 reply = f"当前模型：{current}\n用法：/model <模型名称或简写>\n例如：/model m2.5"
             else:
                 matched = runner.match_model(arg)
@@ -489,12 +487,10 @@ def main():
                     available = runner.get_available_models()
                     reply = f"未找到匹配 \"{arg}\" 的模型\n可用模型：\n" + "\n".join(f"• {m}" for m in available)
                 else:
-                    runner.set_model(matched)
-                    save_opencode_model_config(matched)
+                    runner.set_model(sender_id, matched)
                     reply = f"✅ 已切换模型：{matched}"
         elif action == "clear":
-            runner.clear_model()
-            save_opencode_model_config(None)
+            runner.clear_model(sender_id)
             reply = "✅ 已清除模型设置，将使用环境变量 OPENCODE_MODEL 或默认模型"
 
         log(f"[model] opencode command handled for {sender_id.split('@')[0]}: {action} {arg}".strip())

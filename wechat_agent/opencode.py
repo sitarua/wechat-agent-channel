@@ -19,31 +19,21 @@ class OpenCodeRunner:
         ensure_parent(self.store_file)
         self._lock = threading.Lock()
         self.timeout_ms = self._get_timeout_ms()
-        self._model = None
         self.enable_thinking = os.environ.get("OPENCODE_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
         self.session_store = MultiSessionStore(self.store_file)
 
-    @property
-    def model(self):
-        """动态获取模型 - 优先检查配置文件，其次回退到环境变量。"""
-        if self._model is not None:
-            return self._model
-        config = load_opencode_model_config()
+    def get_model(self, user_id=None):
+        """优先使用当前用户已保存的模型，否则回退到环境变量。"""
+        config = load_opencode_model_config(user_id)
         if config and config.get("model"):
             return config["model"]
-        return os.environ.get("OPENCODE_MODEL", "").strip()
-
-    def set_model(self, model):
-        self._model = model if model else None
-
-    def clear_model(self):
-        self._model = None
+        return ""
 
     def get_available_models(self):
         """从 opencode CLI 获取可用模型列表。"""
         try:
             result = subprocess.run(
-                [self._resolve_command()[0], "models"],
+                self._resolve_command() + ["models"],
                 cwd=Path.cwd(),
                 capture_output=True,
                 text=True,
@@ -129,14 +119,15 @@ class OpenCodeRunner:
 
         return ["opencode"]
 
-    def _build_args(self, session_id, prompt):
+    def _build_args(self, user_id, session_id, prompt):
         args = self._resolve_command() + ["run", "--format", "json"]
         if self.enable_thinking:
             args.append("--thinking")
         if session_id:
             args.extend(["--session", session_id])
-        if self.model:
-            args.extend(["--model", self.model])
+        model = self.get_model(user_id)
+        if model:
+            args.extend(["--model", model])
         args.extend(["--dir", str(Path.cwd()), prompt])
         return args
 
@@ -190,7 +181,7 @@ class OpenCodeRunner:
 
     def _run_once(self, user_id, user_message, session_id=None):
         process = subprocess.Popen(
-            self._build_args(session_id, user_message),
+            self._build_args(user_id, session_id, user_message),
             cwd=Path.cwd(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -344,6 +335,16 @@ class OpenCodeRunner:
                 except Exception as second_error:
                     return f"❌ OpenCode 执行失败：{second_error}"
             return f"❌ OpenCode 执行失败：{first_error}"
+
+    def set_model(self, user_id, model):
+        from .state import save_opencode_model_config
+
+        save_opencode_model_config(user_id, model)
+
+    def clear_model(self, user_id):
+        from .state import save_opencode_model_config
+
+        save_opencode_model_config(user_id, None)
 
     def create_session(self, user_id, name=None):
         with self._lock:
