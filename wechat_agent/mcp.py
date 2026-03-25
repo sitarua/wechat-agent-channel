@@ -8,6 +8,7 @@ from .constants import (
     MCP_LATEST_PROTOCOL_VERSION,
     MCP_SUPPORTED_PROTOCOL_VERSIONS,
 )
+from .reply_protocol import normalize_wechat_text
 
 
 class McpBridge:
@@ -133,7 +134,7 @@ class McpBridge:
 
                 arguments = params.get("arguments") or {}
                 sender_id = str(arguments.get("sender_id") or "")
-                text = str(arguments.get("text") or "")
+                text = normalize_wechat_text(arguments.get("text") or "")
                 media_path = str(arguments.get("media_path") or "").strip()
                 if not text and not media_path:
                     raise RuntimeError("text 和 media_path 至少要提供一个")

@@ -9,7 +9,12 @@ from uuid import uuid4
 
 from .codex import CodexRunner
 from .opencode import OpenCodeRunner
-from .constants import BACKOFF_DELAY_MS, MAX_CONSECUTIVE_FAILURES, RETRY_DELAY_MS
+from .constants import (
+    BACKOFF_DELAY_MS,
+    MAX_CONSECUTIVE_FAILURES,
+    RETRY_DELAY_MS,
+    load_outbound_media_max_bytes,
+)
 from .lock import SingleInstanceLock
 from .media import parse_inbound_message
 from .reply_protocol import parse_agent_reply
@@ -46,6 +51,11 @@ MODEL_COMMAND_ALIASES = {
 MESSAGE_BINDING_TTL_SECONDS = 60 * 30
 MESSAGE_BINDING_MAX_ITEMS = 2000
 SESSION_ATTACHMENT_MAX_ITEMS = 50
+OUTBOUND_MEDIA_MAX_BYTES = load_outbound_media_max_bytes()
+
+
+def _format_bytes_mb(size):
+    return f"{size / (1024 * 1024):.1f}MB"
 
 
 def _safe_int_text(value):
@@ -420,6 +430,17 @@ def main():
                 continue
             if not resolved.is_file():
                 media_errors.append(f"不是文件：{raw_path}")
+                continue
+            try:
+                file_size = resolved.stat().st_size
+            except OSError as err:
+                media_errors.append(f"无法读取文件大小：{raw_path} ({err})")
+                continue
+            if file_size > OUTBOUND_MEDIA_MAX_BYTES:
+                media_errors.append(
+                    "文件过大，已跳过："
+                    f"{raw_path} ({_format_bytes_mb(file_size)}，当前上限 {_format_bytes_mb(OUTBOUND_MEDIA_MAX_BYTES)})"
+                )
                 continue
             normalized_paths.append(candidate_path)
 

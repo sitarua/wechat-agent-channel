@@ -7,12 +7,25 @@ WECHAT_REPLY_BLOCK_RE = re.compile(
     r"```(?:wechat-reply|wechat_reply|wechatreply)\s*(\{.*?\})\s*```",
     re.IGNORECASE | re.DOTALL,
 )
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+ANGLE_LINK_RE = re.compile(r"<(https?://[^>\s]+)>")
 
 
 @dataclass
 class ParsedReply:
     text: str
     media_paths: list[str] = field(default_factory=list)
+
+
+def normalize_wechat_text(raw_text):
+    text = str(raw_text or "").strip()
+    if not text:
+        return ""
+
+    # WeChat plain-text messages do not render Markdown links, so expose the URL directly.
+    text = MARKDOWN_LINK_RE.sub(lambda match: match.group(2), text)
+    text = ANGLE_LINK_RE.sub(lambda match: match.group(1), text)
+    return text.strip()
 
 
 def _normalize_media_paths(value):
@@ -33,7 +46,7 @@ def parse_agent_reply(raw_text):
     text = str(raw_text or "")
     matches = list(WECHAT_REPLY_BLOCK_RE.finditer(text))
     if not matches:
-        return ParsedReply(text=text.strip())
+        return ParsedReply(text=normalize_wechat_text(text))
 
     match = matches[-1]
     payload_raw = match.group(1)
@@ -47,5 +60,5 @@ def parse_agent_reply(raw_text):
     if not media_paths:
         media_paths = _normalize_media_paths(payload.get("media_path"))
 
-    final_text = block_text or visible_text
+    final_text = normalize_wechat_text(block_text or visible_text)
     return ParsedReply(text=final_text, media_paths=media_paths)

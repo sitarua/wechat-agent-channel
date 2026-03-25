@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 
@@ -33,6 +34,18 @@ BOT_TYPE = "3"
 LOGIN_TIMEOUT_MS = 480_000
 STATUS_TIMEOUT_MS = 35_000
 MEDIA_CLI_TIMEOUT_MS = 120_000
+DEFAULT_OUTBOUND_MEDIA_MAX_BYTES = 50 * 1024 * 1024
+
+
+def load_outbound_media_max_bytes():
+    raw = os.environ.get("WECHAT_OUTBOUND_MEDIA_MAX_BYTES", "").strip()
+    if not raw:
+        return DEFAULT_OUTBOUND_MEDIA_MAX_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_OUTBOUND_MEDIA_MAX_BYTES
+    return value if value > 0 else DEFAULT_OUTBOUND_MEDIA_MAX_BYTES
 
 MCP_LATEST_PROTOCOL_VERSION = "2025-11-25"
 MCP_SUPPORTED_PROTOCOL_VERSIONS = {
